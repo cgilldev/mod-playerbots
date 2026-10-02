@@ -9,6 +9,7 @@
 
 #include "AddLootAction.h"
 #include "AttackAction.h"
+#include "AuctionCommerceAction.h"
 #include "AutoMaintenanceOnLevelupAction.h"
 #include "BattleGroundJoinAction.h"
 #include "BattleGroundTactics.h"
@@ -271,6 +272,7 @@ public:
         creators["set pet stance"] = &ActionContext::set_pet_stance;
 
         creators["new rpg status update"] = &ActionContext::new_rpg_status_update;
+        creators["auction commerce"] = &ActionContext::auction_commerce;
         creators["new rpg go grind"] = &ActionContext::new_rpg_go_grind;
         creators["new rpg go camp"] = &ActionContext::new_rpg_go_camp;
         creators["new rpg wander random"] = &ActionContext::new_rpg_wander_random;
@@ -477,6 +479,7 @@ private:
     static Action* set_pet_stance(PlayerbotAI* ai) { return new SetPetStanceAction(ai); }
 
     static Action* new_rpg_status_update(PlayerbotAI* ai) { return new NewRpgStatusUpdateAction(ai); }
+    static Action* auction_commerce(PlayerbotAI* ai) { return new AuctionCommerceAction(ai); }
     static Action* new_rpg_go_grind(PlayerbotAI* ai) { return new NewRpgGoGrindAction(ai); }
     static Action* new_rpg_go_camp(PlayerbotAI* ai) { return new NewRpgGoCampAction(ai); }
     static Action* new_rpg_wander_random(PlayerbotAI* ai) { return new NewRpgWanderRandomAction(ai); }

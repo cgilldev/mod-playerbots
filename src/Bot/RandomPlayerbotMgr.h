@@ -111,6 +111,7 @@ public:
     bool IsProgressionManagedBot(Player* bot);
     bool IsProgressionCohortBot(Player* bot);
     bool IsProgressionPausedBot(Player* bot);
+    uint32 GetProgressionSessionRemaining(Player* bot) const;
     bool CanProgressCohortLevel(Player* bot, uint8 newLevel);
     bool IsAddclassBot(Player* bot);
     bool IsAddclassBot(ObjectGuid::LowType bot);

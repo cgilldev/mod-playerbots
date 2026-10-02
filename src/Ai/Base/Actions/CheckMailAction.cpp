@@ -21,7 +21,7 @@ bool CheckMailAction::Execute(Event /*event*/)
     for (PlayerMails::const_iterator i = bot->GetMails().begin(); i != bot->GetMails().end(); ++i)
     {
         Mail* mail = *i;
-        if (!mail || mail->state == MAIL_STATE_DELETED)
+        if (!mail || mail->state == MAIL_STATE_DELETED || mail->messageType != MAIL_NORMAL)
             continue;
 
         Player* owner = ObjectAccessor::FindConnectedPlayer(ObjectGuid::Create<HighGuid::Player>(mail->sender));

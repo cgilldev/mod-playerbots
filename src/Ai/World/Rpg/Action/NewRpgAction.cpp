@@ -237,6 +237,8 @@ bool NewRpgStatusUpdateAction::Execute(Event /*event*/)
     NewRpgStatus status = info.GetStatus();
     switch (status)
     {
+        case RPG_COMMERCE:
+            return false;
         case RPG_IDLE:
             return RandomChangeStatus({RPG_GO_CAMP, RPG_GO_GRIND, RPG_WANDER_RANDOM, RPG_WANDER_NPC, RPG_DO_QUEST,
                                        RPG_TRAVEL_FLIGHT, RPG_REST, RPG_OUTDOOR_PVP});

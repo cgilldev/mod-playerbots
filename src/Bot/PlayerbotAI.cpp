@@ -248,28 +248,30 @@ PlayerbotAI::~PlayerbotAI()
 
 AuctionSellingObserver* PlayerbotAI::GetAuctionSellingObserver(bool create)
 {
-    if (!sPlayerbotAIConfig.auctionSellingDryRun || !bot || !sRandomPlayerbotMgr.IsProgressionCohortBot(bot))
-    {
-        _auctionSellingObserver.reset();
+    if (!bot)
         return nullptr;
-    }
-
-    auto const& selectedGuids = sPlayerbotAIConfig.auctionSellingDryRunBotGuids;
-    if (!selectedGuids.empty() && !selectedGuids.contains(static_cast<uint32>(bot->GetGUID().GetRawValue())))
+    bool observe = AuctionSellingObserver::IsParticipant(bot) &&
+                   (sPlayerbotAIConfig.auctionSellingEnabled || sPlayerbotAIConfig.auctionSellingDryRun);
+    bool reconcile = !bot->GetPlayerSettings(AuctionSellingObserver::SETTINGS_SOURCE).empty();
+    if (!observe && !reconcile)
     {
         _auctionSellingObserver.reset();
         return nullptr;
     }
 
     if (create && !_auctionSellingObserver)
+    {
         _auctionSellingObserver = std::make_unique<AuctionSellingObserver>(urand(1, 60000));
+        _auctionSellingObserver->Load(bot);
+    }
 
     return _auctionSellingObserver.get();
 }
 
 void PlayerbotAI::UpdateAuctionSelling(uint32 elapsed)
 {
-    if (!sPlayerbotAIConfig.auctionSellingDryRun)
+    if (!sPlayerbotAIConfig.auctionSellingDryRun && !sPlayerbotAIConfig.auctionSellingEnabled &&
+        !_auctionSellingObserver && (!bot || bot->GetPlayerSettings(AuctionSellingObserver::SETTINGS_SOURCE).empty()))
     {
         _auctionSellingObserver.reset();
         return;

@@ -5,6 +5,8 @@
  */
 
 #include "SellAction.h"
+
+#include "AuctionSellingObserver.h"
 #include "ChatHelper.h"
 #include "Event.h"
 #include "ItemPackets.h"
@@ -74,7 +76,11 @@ private:
 class SellVendorItemsVisitor : public SellItemsVisitor
 {
 public:
-    SellVendorItemsVisitor(SellAction* action, AiObjectContext* con) : SellItemsVisitor(action) { context = con; }
+    SellVendorItemsVisitor(SellAction* action, AiObjectContext* con, PlayerbotAI* botAI)
+        : SellItemsVisitor(action), _botAI(botAI)
+    {
+        context = con;
+    }
 
     AiObjectContext* context;
 
@@ -84,8 +90,16 @@ public:
         if (usage != ITEM_USAGE_VENDOR && usage != ITEM_USAGE_AH)
             return true;
 
+        if (auto observer = _botAI->GetAuctionSellingObserver())
+            if (observer->IsReserved(item->GetGUID().GetRawValue()) &&
+                _botAI->GetAiObjectContext()->GetValue<uint8>("bag space")->Get() < 90)
+                return true;
+
         return SellItemsVisitor::Visit(item);
     }
+
+private:
+    PlayerbotAI* _botAI;
 };
 
 bool SellAction::Execute(Event event)
@@ -100,7 +114,7 @@ bool SellAction::Execute(Event event)
 
     if (text == "vendor")
     {
-        SellVendorItemsVisitor visitor(this, context);
+        SellVendorItemsVisitor visitor(this, context, botAI);
         IterateItems(&visitor);
         return true;
     }

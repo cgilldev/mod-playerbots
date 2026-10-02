@@ -56,7 +56,7 @@ enum class AutoPartyBuffMode : uint8
 
 enum NewRpgStatus : int
 {
-    //Initial Status
+    // Initial Status
     RPG_IDLE = 0,
     RPG_GO_GRIND = 1,
     RPG_GO_CAMP = 2,
@@ -71,7 +71,8 @@ enum NewRpgStatus : int
     // Taking a break
     RPG_REST = 7,
     RPG_OUTDOOR_PVP = 8,
-    RPG_STATUS_END = 9
+    RPG_COMMERCE = 9,
+    RPG_STATUS_END = 10
 };
 
 #define MAX_SPECNO 20
@@ -104,6 +105,12 @@ public:
 
     bool enabled;
     bool auctionSellingDryRun = false;
+    bool auctionSellingEnabled = false;
+    uint32 auctionSellingMaxListings = 5;
+    uint32 auctionSellingBatchSize = 3;
+    uint32 auctionSellingTravelSeconds = 600;
+    uint32 auctionSellingCooldownSeconds = 3600;
+    uint32 auctionSellingReserveCopper = 1000;
     std::set<uint32> auctionSellingDryRunBotGuids;
     bool disabledWithoutRealPlayer;
     bool EnableICCBuffs;

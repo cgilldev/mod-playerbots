@@ -121,15 +121,28 @@ AiPlayerbot.OfflineProgressionHostMemoryFile = "/run/playerbots/host-memavailabl
 AiPlayerbot.OfflineProgressionHostMinAvailableMemory = 1024
 
 # Auction-selling inventory observation only. Disabled by default; does not reserve
-# items, change vendor behavior, travel, list auctions or collect mail.
-# Tracks ordinary creature/gameobject loot acquired during the current login;
-# pre-existing, crafted, factory/reset, trade and mail stock is not proven earned.
+# items or initiate new selling travel/listings. Outstanding auction settlement
+# remains available. Tracks ordinary creature/gameobject loot; pre-existing,
+# crafted, factory/reset, trade and arbitrary mail stock is not proven earned.
 # Summarizes inventory eligibility in playerbots logs at most once per minute per
-# selected bot, only when results change. Market/profit evaluation is not implemented.
+# selected bot, only when results change. EnablePlayerSettings persists provenance.
 AiPlayerbot.AuctionSelling.DryRun = 0
 # Optional comma-separated character GUIDs within the progression cohort.
 # Empty observes the cohort; use a small explicit set for an initial pilot.
 AiPlayerbot.AuctionSelling.DryRunBotGuids =
+# Autonomous earned-surplus selling and physical mailbox settlement. Requires
+# the paired core inventory hooks and EnablePlayerSettings. DryRun overrides
+# new selling. The selected GUID list above also scopes live participation.
+AiPlayerbot.AuctionSelling.Enabled = 0
+AiPlayerbot.AuctionSelling.MaxListings = 5
+AiPlayerbot.AuctionSelling.BatchSize = 3
+# Bounded active trip time, including interruptions; no commerce teleport recovery.
+AiPlayerbot.AuctionSelling.TravelSeconds = 600
+# Wall-clock cooldown between errands; persisted with inventory metadata.
+AiPlayerbot.AuctionSelling.CooldownSeconds = 3600
+# Cash buffer in copper, in addition to estimated repair and training costs.
+# Total listing deposits consume at most 10% of cash after this reserve.
+AiPlayerbot.AuctionSelling.ReserveCopper = 1000
 
 # Addclass accounts
 # Number of accounts created for bots reserved for the addclass command. As with randombots, each account has

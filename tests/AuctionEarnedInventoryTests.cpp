@@ -112,4 +112,58 @@ int main()
     boundedHistory.RecordStored(300, cloth, 1, 1);
     boundedHistory.RecordLoot(300, cloth, 1, 1);
     assert(boundedHistory.ObserveCount(300, cloth, 1) == 1);
+
+    AuctionEarnedInventory lifecycle;
+    lifecycle.RecordStored(50, variant, 5, 5);
+    lifecycle.RecordLoot(50, variant, 5, 5);
+    assert(lifecycle.MarkAuction(50, 100));
+    assert(!lifecycle.MarkAuction(50, 101));
+    lifecycle.Forget(50);  // Native inventory removal retains the auction lifecycle.
+    lifecycle.Retain({});
+    assert(lifecycle.GetAuctionId(50) == 100);
+    assert(lifecycle.ObserveCount(50, variant, 5) == 0);
+    AuctionEarnedInventory restarted;
+    assert(restarted.Load(lifecycle.Serialize(1234)) == 1234);
+    assert(restarted.GetAuctionId(50) == 100);
+    assert(restarted.RestoreReturn(50, 51, variant, 5, 5));
+    assert(restarted.GetAttempts(51) == 1);
+    assert(restarted.ObserveCount(51, variant, 5) == 5);
+    assert(restarted.MarkAuction(51, 101));
+    assert(restarted.RestoreReturn(51, 52, variant, 5, 5));
+    assert(restarted.GetAttempts(52) == 2);
+    assert(!restarted.MarkAuction(52, 102));
+    // A returned stack merged into unrelated stock cannot prove that whole
+    // stack. Replaying or mismatching the return cannot reset attempts.
+    AuctionEarnedInventory merged;
+    merged.RecordStored(60, cloth, 5, 5);
+    merged.RecordLoot(60, cloth, 5, 5);
+    assert(merged.MarkAuction(60, 200));
+    assert(!merged.RestoreReturn(60, 61, other, 5, 5));
+    assert(!merged.RestoreReturn(60, 61, cloth, 5, 4));
+    assert(merged.RestoreReturn(60, 61, cloth, 8, 5));
+    assert(merged.ObserveCount(61, cloth, 8) == 5);
+    assert(!merged.MarkAuction(61, 201));
+    assert(!merged.RestoreReturn(60, 61, cloth, 8, 5));
+    assert(merged.GetAttempts(61) == 1);
+
+    // Settling native auction mail removes just that auction, not unrelated
+    // earned inventory or another outstanding listing.
+    assert(lifecycle.HasAuctions());
+    lifecycle.SettleAuction(999);
+    assert(lifecycle.HasAuctions());
+    lifecycle.SettleAuction(100);
+    assert(!lifecycle.HasAuctions());
+    assert(lifecycle.GetAuctionId(50) == 0);
+
+    auto duplicate = merged.Serialize(0);
+    duplicate[2] = 2;
+    auto record = std::vector<uint32_t>(duplicate.begin() + 3, duplicate.end());
+    duplicate.insert(duplicate.end(), record.begin(), record.end());
+    assert(restarted.Load(duplicate) == 0);
+    assert(restarted.ObserveCount(61, cloth, 8) == 0);
+
+    auto corrupt = restarted.Serialize(1234);
+    corrupt.pop_back();
+    assert(restarted.Load(corrupt) == 0);
+    assert(restarted.ObserveCount(52, variant, 5) == 0);
 }

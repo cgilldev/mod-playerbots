@@ -761,6 +761,27 @@ bool RandomPlayerbotMgr::IsProgressionPausedBot(Player* bot)
            bot->GetLevel() >= progressionLevelCeiling.load();
 }
 
+uint32 RandomPlayerbotMgr::GetProgressionSessionRemaining(Player* bot) const
+{
+    if (!bot)
+        return 0;
+    auto session = progressionMinimumEnd.find(static_cast<uint32>(bot->GetGUID().GetRawValue()));
+    time_t now = time(nullptr);
+    uint32 remaining = session != progressionMinimumEnd.end() && session->second > now
+                           ? static_cast<uint32>(session->second - now)
+                           : 0;
+    if (offlineProgressionState.load() == PROGRESSION_RUNNING)
+    {
+        // This helper is called only during world-thread errand planning. The
+        // persisted seconds counter records elapsed runtime, not time left.
+        uint32 hours = sConfigMgr->GetOption<uint32>("AiPlayerbot.OfflineProgressionMaxHours", 12);
+        uint32 limit = hours <= 12 ? hours * HOUR : 0;
+        uint32 elapsed = offlineProgressionSeconds.load();
+        remaining = std::min(remaining, elapsed < limit ? limit - elapsed : 0);
+    }
+    return remaining;
+}
+
 bool RandomPlayerbotMgr::CanProgressCohortLevel(Player* bot, uint8 newLevel)
 {
     if (!IsProgressionCohortBot(bot))
@@ -4012,10 +4033,11 @@ void RandomPlayerbotMgr::PrintStats()
         LOG_INFO("playerbots", "Bots rpg status:");
         LOG_INFO("playerbots",
                  "    Idle: {}, Rest: {}, GoGrind: {}, GoCamp: {}, MoveRandom: {}, MoveNpc: {}, DoQuest: {}, "
-                 "TravelFlight: {}, OutdoorPvP: {}",
+                 "TravelFlight: {}, OutdoorPvP: {}, Commerce: {}",
                  rpgStatusCount[RPG_IDLE], rpgStatusCount[RPG_REST], rpgStatusCount[RPG_GO_GRIND],
                  rpgStatusCount[RPG_GO_CAMP], rpgStatusCount[RPG_WANDER_RANDOM], rpgStatusCount[RPG_WANDER_NPC],
-                 rpgStatusCount[RPG_DO_QUEST], rpgStatusCount[RPG_TRAVEL_FLIGHT], rpgStatusCount[RPG_OUTDOOR_PVP]);
+                 rpgStatusCount[RPG_DO_QUEST], rpgStatusCount[RPG_TRAVEL_FLIGHT], rpgStatusCount[RPG_OUTDOOR_PVP],
+                 rpgStatusCount[RPG_COMMERCE]);
 
         LOG_INFO("playerbots", "Bots total quests:");
         LOG_INFO("playerbots", "    Accepted: {}, Rewarded: {}, Dropped: {}", rpgStasticTotal.questAccepted,

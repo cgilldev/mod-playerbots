@@ -102,6 +102,8 @@ NewRpgStatus NewRpgInfo::StatusFromString(std::string const& name)
     if (name == "do quest")       return RPG_DO_QUEST;
     if (name == "travel flight")  return RPG_TRAVEL_FLIGHT;
     if (name == "outdoor pvp")    return RPG_OUTDOOR_PVP;
+    if (name == "commerce")
+        return RPG_COMMERCE;
     return RPG_STATUS_END;
 }
 
@@ -118,6 +120,8 @@ NewRpgStatus NewRpgInfo::GetStatus()
         if constexpr (std::is_same_v<T, DoQuest>) return RPG_DO_QUEST;
         if constexpr (std::is_same_v<T, TravelFlight>) return RPG_TRAVEL_FLIGHT;
         if constexpr (std::is_same_v<T, OutdoorPvP>) return RPG_OUTDOOR_PVP;
+        if constexpr (std::is_same_v<T, Commerce>)
+            return RPG_COMMERCE;
         return RPG_IDLE;
     }, data);
 }
@@ -181,6 +185,10 @@ std::string NewRpgInfo::ToString()
             out << "\nfromNode: " << arg.path[0];
             out << "\ntoNode: " << arg.path[arg.path.size() - 1];
             out << "\ninFlight: " << arg.inFlight;
+        }
+        else if constexpr (std::is_same_v<T, Commerce>)
+        {
+            out << "COMMERCE";
         }
         else if constexpr (std::is_same_v<T, OutdoorPvP>)
         {

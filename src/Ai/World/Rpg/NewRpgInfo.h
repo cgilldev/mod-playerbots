@@ -83,17 +83,11 @@ struct NewRpgInfo
     WorldPosition moveFarPos;
     // END MOVE_FAR
 
-    using RpgData = std::variant<
-        Idle,
-        GoGrind,
-        GoCamp,
-        WanderNpc,
-        WanderRandom,
-        DoQuest,
-        Rest,
-        TravelFlight,
-        OutdoorPvP
-    >;
+    struct Commerce
+    {
+    };
+    using RpgData =
+        std::variant<Idle, GoGrind, GoCamp, WanderNpc, WanderRandom, DoQuest, Rest, TravelFlight, OutdoorPvP, Commerce>;
     RpgData data;
 
     NewRpgStatus GetStatus();

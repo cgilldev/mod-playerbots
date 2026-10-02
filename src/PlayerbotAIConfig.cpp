@@ -82,6 +82,16 @@ bool PlayerbotAIConfig::Initialize()
 
     enabled = sConfigMgr->GetOption<bool>("AiPlayerbot.Enabled", true);
     auctionSellingDryRun = sConfigMgr->GetOption<bool>("AiPlayerbot.AuctionSelling.DryRun", false);
+    auctionSellingEnabled = sConfigMgr->GetOption<bool>("AiPlayerbot.AuctionSelling.Enabled", false);
+    auctionSellingMaxListings =
+        std::clamp(sConfigMgr->GetOption<uint32>("AiPlayerbot.AuctionSelling.MaxListings", 5), 1u, 20u);
+    auctionSellingBatchSize =
+        std::clamp(sConfigMgr->GetOption<uint32>("AiPlayerbot.AuctionSelling.BatchSize", 3), 1u, 5u);
+    auctionSellingTravelSeconds =
+        std::clamp(sConfigMgr->GetOption<uint32>("AiPlayerbot.AuctionSelling.TravelSeconds", 600), 60u, 1800u);
+    auctionSellingCooldownSeconds =
+        std::max(300u, sConfigMgr->GetOption<uint32>("AiPlayerbot.AuctionSelling.CooldownSeconds", 3600));
+    auctionSellingReserveCopper = sConfigMgr->GetOption<uint32>("AiPlayerbot.AuctionSelling.ReserveCopper", 1000);
     auctionSellingDryRunBotGuids.clear();
     std::string const auctionObserverGuids =
         sConfigMgr->GetOption<std::string>("AiPlayerbot.AuctionSelling.DryRunBotGuids", "");

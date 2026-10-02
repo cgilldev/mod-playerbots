@@ -37,7 +37,7 @@
 #include "TravelMgr.h"
 #include "G3D/Vector2.h"
 
-bool NewRpgBaseAction::MoveFarTo(WorldPosition dest)
+bool NewRpgBaseAction::MoveFarTo(WorldPosition dest, bool allowTeleportRecovery)
 {
     if (dest == WorldPosition())
         return false;
@@ -103,6 +103,8 @@ bool NewRpgBaseAction::MoveFarTo(WorldPosition dest)
     }
     else if (++botAI->rpgInfo.stuckAttempts >= 5 && GetMSTimeDiffToNow(botAI->rpgInfo.stuckTs) >= stuckTime)
     {
+        if (!allowTeleportRecovery)
+            return false;
         // No meaningful progress toward dest for `stuckTime`: fall
         // back to teleporting directly so the bot can get on with
         // its RPG objective instead of oscillating indefinitely.

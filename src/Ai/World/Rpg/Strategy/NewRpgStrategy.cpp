@@ -18,6 +18,7 @@ std::vector<NextAction> NewRpgStrategy::getDefaultActions()
 
 void NewRpgStrategy::InitTriggers(std::vector<TriggerNode*>& triggers)
 {
+    triggers.push_back(new TriggerNode("commerce status", {NextAction("auction commerce", ACTION_NORMAL + 2.0f)}));
     triggers.push_back(
         new TriggerNode(
             "go grind status",

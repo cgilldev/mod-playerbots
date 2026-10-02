@@ -8,6 +8,7 @@
 
 #include <mysqld_error.h>
 
+#include "AuctionCommerceMgr.h"
 #include "AuctionSellingObserver.h"
 #include "BattleGroundTactics.h"
 #include "BattlefieldScript.h"
@@ -131,7 +132,8 @@ public:
                         PLAYERHOOK_CAN_PLAYER_USE_GROUP_CHAT, PLAYERHOOK_CAN_PLAYER_USE_GUILD_CHAT,
                         PLAYERHOOK_CAN_PLAYER_USE_CHANNEL_CHAT, PLAYERHOOK_ON_GIVE_EXP, PLAYERHOOK_ON_STORE_NEW_ITEM,
                         PLAYERHOOK_ON_LOOT_ITEM, PLAYERHOOK_ON_AFTER_MOVE_ITEM_FROM_INVENTORY,
-                        PLAYERHOOK_ON_AFTER_MOVE_ITEM_TO_INVENTORY, PLAYERHOOK_ON_BEFORE_TELEPORT})
+                        PLAYERHOOK_ON_AFTER_MOVE_ITEM_TO_INVENTORY, PLAYERHOOK_ON_ITEM_COUNT_CHANGED,
+                        PLAYERHOOK_ON_SAVE_INVENTORY, PLAYERHOOK_ON_BEFORE_TELEPORT})
     {
     }
 
@@ -233,7 +235,8 @@ public:
 
     void OnPlayerStoreNewItem(Player* player, Item* item, uint32 count) override
     {
-        if (!sPlayerbotAIConfig.auctionSellingDryRun || !player)
+        if ((!sPlayerbotAIConfig.auctionSellingDryRun && !sPlayerbotAIConfig.auctionSellingEnabled) ||
+            !AuctionSellingObserver::IsParticipant(player))
             return;
 
         if (PlayerbotAI* botAI = GET_PLAYERBOT_AI(player))
@@ -243,7 +246,8 @@ public:
 
     void OnPlayerLootItem(Player* player, Item* item, uint32 count, ObjectGuid lootGuid) override
     {
-        if (!sPlayerbotAIConfig.auctionSellingDryRun || !player || (!lootGuid.IsCreature() && !lootGuid.IsGameObject()))
+        if ((!sPlayerbotAIConfig.auctionSellingDryRun && !sPlayerbotAIConfig.auctionSellingEnabled) ||
+            !AuctionSellingObserver::IsParticipant(player) || (!lootGuid.IsCreature() && !lootGuid.IsGameObject()))
             return;
 
         if (PlayerbotAI* botAI = GET_PLAYERBOT_AI(player))
@@ -259,9 +263,28 @@ public:
 
     void OnPlayerAfterMoveItemToInventory(Player* player, Item* item, bool /*update*/) override
     {
-        // Incoming mail/trades and stack transfers are unproven. Until durable
-        // allocation tracking exists, discard affected provenance conservatively.
-        ForgetAuctionInventory(player, item);
+        // Incoming mail/trades and stack transfers are unproven unless a native
+        // auction return can be matched to a saved earned lot.
+        if (HasAuctionState(player))
+            if (PlayerbotAI* botAI = GET_PLAYERBOT_AI(player))
+                if (AuctionSellingObserver* observer = botAI->GetAuctionSellingObserver())
+                    observer->RecordIncoming(item);
+    }
+
+    void OnPlayerItemCountChanged(Player* player, Item* item, uint32 count) override
+    {
+        if (HasAuctionState(player))
+            if (PlayerbotAI* botAI = GET_PLAYERBOT_AI(player))
+                if (AuctionSellingObserver* observer = botAI->GetAuctionSellingObserver())
+                    observer->ObserveCount(item, count);
+    }
+
+    void OnPlayerSaveInventory(Player* player, CharacterDatabaseTransaction trans) override
+    {
+        if (HasAuctionState(player))
+            if (PlayerbotAI* botAI = GET_PLAYERBOT_AI(player))
+                if (AuctionSellingObserver* observer = botAI->GetAuctionSellingObserver(true))
+                    observer->Save(player, trans);
     }
 
     using PlayerScript::OnPlayerCanUseChat;  // keep the base overloads visible
@@ -400,9 +423,15 @@ public:
     }
 
 private:
+    static bool HasAuctionState(Player* player)
+    {
+        return player && (sPlayerbotAIConfig.auctionSellingEnabled || sPlayerbotAIConfig.auctionSellingDryRun ||
+                          !player->GetPlayerSettings(AuctionSellingObserver::SETTINGS_SOURCE).empty());
+    }
+
     static void ForgetAuctionInventory(Player* player, Item* item)
     {
-        if (!sPlayerbotAIConfig.auctionSellingDryRun || !player)
+        if (!HasAuctionState(player))
             return;
 
         if (PlayerbotAI* botAI = GET_PLAYERBOT_AI(player))
@@ -643,6 +672,7 @@ void AddSC_randombot_level_mgr();
 
 void AddPlayerbotsScripts()
 {
+    AddPlayerbotCommerceScripts();
     new PlayerbotsBattlefieldScript();
     new PlayerbotsDatabaseScript();
     new PlayerbotsPlayerScript();

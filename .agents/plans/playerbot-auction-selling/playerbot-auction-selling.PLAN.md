@@ -1,13 +1,18 @@
 # Playerbot auction selling implementation plan
 
-Date: 2026-10-02. Status: design with an initial disabled inventory-observer slice;
-live auction selling is not implemented or enabled.
+Date: 2026-10-02. Status: full first-release implementation; native build and
+bounded rollout validation in progress. Actual interfaces and conservative
+release boundaries are documented in `docs/auction-selling.md`.
 
-Initial implementation: session-local matching store/loot observations, whole-stack
-eligibility, staggered dry-run snapshots and focused quantity/preservation tests.
-See `docs/auction-selling.md` for actual configuration, validation and limitations.
-Persistent provenance, pricing, companion economy safeguards, native mutations,
-mail settlement and town behavior remain to be implemented.
+Implemented: durable earned quantity and relist provenance, native whole-stack
+listing and mailbox settlement, world-thread generation-checked operations,
+faction errands with walking/known same-map flights, protected reserves, conservative
+pricing, vendor cooperation, bounded travel/cooldown, filler coordination, and
+restart-safe aggregate synthetic buyer commitments. The native character_settings
+transaction hook replaces the proposed separate provenance table. Core optional
+auction role flags keep the two modules independent. Session rotation discards
+movement intent and recovers from native state; cooldown uses wall-clock time.
+Default shared buyer caps are 1 gold and 20 commitments per rolling hour.
 
 Read with the adjacent REQUIREMENTS and ANALYSIS documents. Existing inspected
 branches are `persistent-bots-ah-20261002` in the three source repositories.
