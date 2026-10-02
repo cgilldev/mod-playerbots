@@ -27,6 +27,7 @@ int main()
 
     // A matching native store/loot sequence grants only the actual earned
     // quantity. Replaying a loot callback cannot grant it a second time.
+    inventory.ObserveNativeCount(2, cloth, 5, 8);
     inventory.RecordStored(2, cloth, 8, 3);
     inventory.RecordLoot(2, cloth, 8, 3);
     inventory.RecordLoot(2, cloth, 8, 3);
@@ -34,6 +35,7 @@ int main()
     assert(AuctionEarnedInventory::Classify(8, 3, true, true) == Disposition::PartialEarned);
 
     // Subsequent earned additions to an existing stack accumulate normally.
+    inventory.ObserveNativeCount(2, cloth, 8, 10);
     inventory.RecordStored(2, cloth, 10, 2);
     inventory.RecordLoot(2, cloth, 10, 2);
     assert(inventory.ObserveCount(2, cloth, 10) == 5);
@@ -41,6 +43,7 @@ int main()
     // Consumption is charged against earned goods first. Replenishing the
     // stack from an untrusted source must not restore consumed provenance.
     assert(inventory.ObserveCount(2, cloth, 8) == 3);
+    inventory.ObserveNativeCount(2, cloth, 8, 10);
     inventory.RecordStored(2, cloth, 10, 2);
     assert(inventory.ObserveCount(2, cloth, 10) == 3);
     assert(inventory.ObserveCount(2, cloth, 6) == 0);
@@ -55,14 +58,46 @@ int main()
 
     // Untrusted additions after consumption between snapshots are bounded by
     // the stock that existed before the declared addition.
+    inventory.ObserveNativeCount(3, cloth, 2, 0);
+    inventory.ObserveNativeCount(3, cloth, 0, 2);
     inventory.RecordStored(3, cloth, 2, 2);
     assert(inventory.ObserveCount(3, cloth, 2) == 0);
 
+    // A multi-stack callback describes twenty looted items, but the final
+    // destination received only six. Its older two items remain unproven,
+    // including when this is the observer's very first native count event.
+    AuctionEarnedInventory multiStack;
+    multiStack.ObserveNativeCount(20, cloth, 2, 8);
+    multiStack.RecordStored(20, cloth, 8, 20);
+    multiStack.RecordLoot(20, cloth, 8, 20);
+    assert(multiStack.ObserveCount(20, cloth, 8) == 6);
+    assert(!multiStack.MarkAuction(20, 300));
+    multiStack.ObserveNativeCount(20, cloth, 8, 10);
+    multiStack.RecordStored(20, cloth, 10, 20);
+    multiStack.RecordLoot(20, cloth, 10, 20);
+    assert(multiStack.ObserveCount(20, cloth, 10) == 8);
+    assert(!multiStack.MarkAuction(20, 300));
+
+    // Unknown consumption/replenishment between snapshots cannot replenish
+    // earned proof, and a genuine multi-stack addition preserves old proof.
+    AuctionEarnedInventory nativeCounts;
+    nativeCounts.RecordStored(21, cloth, 2, 2);
+    nativeCounts.RecordLoot(21, cloth, 2, 2);
+    nativeCounts.ObserveNativeCount(21, cloth, 2, 8);
+    nativeCounts.RecordStored(21, cloth, 8, 20);
+    nativeCounts.RecordLoot(21, cloth, 8, 20);
+    assert(nativeCounts.ObserveCount(21, cloth, 8) == 8);
+    nativeCounts.ObserveNativeCount(21, cloth, 8, 2);
+    nativeCounts.ObserveNativeCount(21, cloth, 2, 8);
+    assert(nativeCounts.ObserveCount(21, cloth, 8) == 2);
+
     // Mismatched store counts and item variants do not prove loot origin.
+    inventory.ObserveNativeCount(4, cloth, 5, 7);
     inventory.RecordStored(4, cloth, 7, 2);
     inventory.RecordLoot(4, cloth, 7, 3);
     inventory.RecordLoot(4, variant, 7, 2);
     assert(inventory.ObserveCount(4, cloth, 7) == 0);
+    inventory.ObserveNativeCount(4, cloth, 7, 8);
     inventory.RecordStored(4, cloth, 8, 1);
     inventory.RecordLoot(4, cloth, 8, 1);
     assert(inventory.ObserveCount(4, other, 8) == 0);

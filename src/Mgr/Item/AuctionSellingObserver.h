@@ -41,7 +41,7 @@ public:
     void Update(PlayerbotAI* botAI, uint32_t elapsedMilliseconds);
     void Load(Player* bot);
     void Save(Player* bot, CharacterDatabaseTransaction trans);
-    void ObserveCount(Item const* item, uint32_t count);
+    void ObserveCount(Item const* item, uint32_t previousCount, uint32_t count);
     void OnAuctionAdded(AuctionEntry* auction);
     bool IsReserved(uint64_t guid) const;
     static bool IsParticipant(Player* bot);

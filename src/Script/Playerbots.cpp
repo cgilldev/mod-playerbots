@@ -271,12 +271,12 @@ public:
                     observer->RecordIncoming(item);
     }
 
-    void OnPlayerItemCountChanged(Player* player, Item* item, uint32 count) override
+    void OnPlayerItemCountChanged(Player* player, Item* item, uint32 previousCount, uint32 count) override
     {
         if (HasAuctionState(player))
             if (PlayerbotAI* botAI = GET_PLAYERBOT_AI(player))
-                if (AuctionSellingObserver* observer = botAI->GetAuctionSellingObserver())
-                    observer->ObserveCount(item, count);
+                if (AuctionSellingObserver* observer = botAI->GetAuctionSellingObserver(true))
+                    observer->ObserveCount(item, previousCount, count);
     }
 
     void OnPlayerSaveInventory(Player* player, CharacterDatabaseTransaction trans) override

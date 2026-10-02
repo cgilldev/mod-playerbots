@@ -40,7 +40,9 @@ Only matching native StoreNewItem/LootItem events from creature or gameobject
 loot prove earned stock, including gathering through those paths. Starting
 inventory, factory/reset goods, purchases, crafting, quest rewards, item-container
 loot, trades and arbitrary mail do not acquire provenance. Unknown additions,
-consumption, changed variants and uncertain transfers reduce proof. The bounded
+consumption, changed variants and uncertain transfers reduce proof. Native count
+hooks supply the previous and new quantity on each stack; multi-stack loot
+callbacks cannot credit older contents using the batch-wide looted amount. The bounded
 ledger holds up to 256 item GUIDs per bot. Group-roll paths without matching
 callbacks are conservatively unproven.
 

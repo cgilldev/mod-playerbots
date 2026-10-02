@@ -62,9 +62,13 @@ public:
         if (_lots.size() >= MAX_TRACKED_ITEMS && !_lots.contains(guid))
             return;
 
+        bool newGuid = !_lots.contains(guid);
         Lot& lot = _lots[guid];
+        uint32_t actualAdded = newGuid ? std::min(count, addedCount) : std::min(lot.NativeAddedCount, addedCount);
         Observe(lot, identity, count);
-        lot.EarnedCount = std::min(lot.EarnedCount, count - std::min(count, addedCount));
+        lot.EarnedCount = std::min(lot.EarnedCount, count - std::min(count, actualAdded));
+        lot.PendingEarnedCount = actualAdded;
+        lot.NativeAddedCount = 0;
         lot.PendingCount = count;
         lot.PendingAddedCount = addedCount;
     }
@@ -80,9 +84,26 @@ public:
             lot.PendingAddedCount != lootedCount)
             return;
 
-        lot.EarnedCount = static_cast<uint32_t>(
-            std::min<uint64_t>(count, static_cast<uint64_t>(lot.EarnedCount) + std::min(count, lootedCount)));
+        lot.EarnedCount = static_cast<uint32_t>(std::min<uint64_t>(
+            count, static_cast<uint64_t>(lot.EarnedCount) + std::min(count, lot.PendingEarnedCount)));
         lot.PendingAddedCount = 0;
+        lot.PendingEarnedCount = 0;
+    }
+
+    // Native count events expose the actual per-stack delta. StoreNewItem's
+    // count describes the entire loot batch, which may fill several stacks.
+    void ObserveNativeCount(uint64_t guid, Identity identity, uint32_t previousCount, uint32_t count)
+    {
+        if (!guid || (_lots.size() >= MAX_TRACKED_ITEMS && !_lots.contains(guid)))
+            return;
+        Lot& lot = _lots[guid];
+        if (lot.AuctionId)
+            return;
+        Observe(lot, identity, previousCount);
+        Observe(lot, identity, count);
+        lot.NativeAddedCount = count > previousCount ? count - previousCount : 0;
+        lot.PendingAddedCount = 0;
+        lot.PendingEarnedCount = 0;
     }
 
     uint32_t ObserveCount(uint64_t guid, Identity identity, uint32_t count)
@@ -97,6 +118,8 @@ public:
         // Acquisition callbacks are synchronous; a later snapshot cannot claim
         // an earlier unmatched store event as newly earned goods.
         found->second.PendingAddedCount = 0;
+        found->second.PendingEarnedCount = 0;
+        found->second.NativeAddedCount = 0;
         return found->second.EarnedCount;
     }
 
@@ -227,6 +250,8 @@ private:
         uint32_t PendingAddedCount = 0;
         uint32_t Attempts = 0;
         uint32_t AuctionId = 0;
+        uint32_t NativeAddedCount = 0;
+        uint32_t PendingEarnedCount = 0;
     };
 
     static void Observe(Lot& lot, Identity identity, uint32_t count)

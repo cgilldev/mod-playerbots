@@ -63,11 +63,11 @@ void AuctionSellingObserver::Save(Player* bot, CharacterDatabaseTransaction tran
                                                                SETTINGS_SOURCE, settings));
 }
 
-void AuctionSellingObserver::ObserveCount(Item const* item, uint32_t count)
+void AuctionSellingObserver::ObserveCount(Item const* item, uint32_t previousCount, uint32_t count)
 {
     if (item)
     {
-        _inventory.ObserveCount(item->GetGUID().GetRawValue(), GetIdentity(item), count);
+        _inventory.ObserveNativeCount(item->GetGUID().GetRawValue(), GetIdentity(item), previousCount, count);
         if (!count)
             _inventory.Forget(item->GetGUID().GetRawValue());
     }
