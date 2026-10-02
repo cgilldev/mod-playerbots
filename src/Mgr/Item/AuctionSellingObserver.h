@@ -8,6 +8,7 @@
 #define PLAYERBOTS_AUCTIONSELLINGOBSERVER_H
 
 #include <array>
+#include <string>
 #include <vector>
 
 #include "AuctionEarnedInventory.h"
@@ -51,7 +52,7 @@ public:
     bool IsPending() const { return _pending; }
     uint64_t GetGeneration() const { return _generation; }
     void Finish(PlayerbotAI* botAI);
-    static constexpr char const* SETTINGS_SOURCE = "playerbot_commerce_v1";
+    inline static std::string const SETTINGS_SOURCE = "playerbot_commerce_v1";
     struct Destination
     {
         uint32_t Map;
