@@ -5,18 +5,22 @@
  */
 
 #include "RandomPlayerbotFactory.h"
-#include "PlayerbotsDatabase.h"
+
+#include <unordered_set>
+
 #include "AccountMgr.h"
 #include "ArenaTeamMgr.h"
 #include "CharacterCache.h"
-#include "ObjectAccessor.h"
-#include "Player.h"
+#include "Config.h"
 #include "DatabaseEnv.h"
 #include "Log.h"
+#include "ObjectAccessor.h"
+#include "Player.h"
 #include "PlayerbotAI.h"
 #include "PlayerbotAIConfig.h"
 #include "PlayerbotOperations.h"
 #include "PlayerbotWorldThreadProcessor.h"
+#include "PlayerbotsDatabase.h"
 #include "RaceMgr.h"
 #include "ScriptMgr.h"
 #include "SharedDefines.h"
@@ -62,11 +66,17 @@ bool RandomPlayerbotFactory::IsValidRaceClassCombination(uint8 race, uint8 cls, 
     return info != nullptr;
 }
 
-Player* RandomPlayerbotFactory::CreateRandomBot(WorldSession* session, uint8 cls, std::unordered_map<NameRaceAndGender, std::vector<std::string>>& nameCache)
+Player* RandomPlayerbotFactory::CreateRandomBot(
+    WorldSession* session, uint8 cls, std::unordered_map<NameRaceAndGender, std::vector<std::string>>& nameCache,
+    std::unordered_map<uint8, uint32>& raceCounts, bool progressionPoolEnabled)
 {
     LOG_DEBUG("playerbots", "Creating a new random bot for class: {}", cls);
 
     const bool alliance = static_cast<bool>(urand(0, 1));
+
+    static std::unordered_map<uint8, uint32> const targetCounts = {
+        {RACE_BLOODELF, 20}, {RACE_ORC, 10},  {RACE_TROLL, 10},   {RACE_TAUREN, 10}, {RACE_UNDEAD_PLAYER, 10},
+        {RACE_HUMAN, 4},     {RACE_DWARF, 4}, {RACE_NIGHTELF, 4}, {RACE_GNOME, 4},   {RACE_DRAENEI, 4}};
 
     std::vector<uint8> raceOptions;
     for (uint8 race = RACE_HUMAN; race < sRaceMgr->GetMaxRaces(); ++race)
@@ -75,13 +85,11 @@ Player* RandomPlayerbotFactory::CreateRandomBot(WorldSession* session, uint8 cls
         if ((1 << (race - 1)) & sWorld->getIntConfig(CONFIG_CHARACTER_CREATING_DISABLED_RACEMASK))
             continue;
 
-        // Try to get 50/50 faction distribution for random bot population balance.
-        // Without this check, races from the faction with more class options would dominate.
-        if (alliance == IsAlliance(race))
-        {
-            if (IsValidRaceClassCombination(race, cls, sWorld->getIntConfig(CONFIG_EXPANSION)))
-                raceOptions.push_back(race);
-        }
+        bool targetRace = !progressionPoolEnabled || targetCounts.contains(race);
+        bool factionMatches = progressionPoolEnabled || alliance == IsAlliance(race);
+        if (targetRace && factionMatches &&
+            IsValidRaceClassCombination(race, cls, sWorld->getIntConfig(CONFIG_EXPANSION)))
+            raceOptions.push_back(race);
     }
 
     if (raceOptions.empty())
@@ -90,7 +98,30 @@ Player* RandomPlayerbotFactory::CreateRandomBot(WorldSession* session, uint8 cls
         return nullptr;
     }
 
-    const uint8 race = raceOptions[urand(0, raceOptions.size() - 1)];
+    uint8 race = raceOptions[urand(0, raceOptions.size() - 1)];
+    uint32 largestDeficit = 0;
+    if (progressionPoolEnabled)
+    {
+        for (uint8 raceOption : raceOptions)
+        {
+            auto target = targetCounts.find(raceOption);
+            if (target == targetCounts.end())
+                continue;
+            uint32 current = raceCounts[raceOption];
+            uint32 deficit = current < target->second ? target->second - current : 0;
+            if (deficit > largestDeficit)
+            {
+                race = raceOption;
+                largestDeficit = deficit;
+            }
+        }
+        if (!largestDeficit)
+        {
+            LOG_INFO("playerbots",
+                     "Progression race targets are satisfied; no additional cohort character will be created.");
+            return nullptr;
+        }
+    }
     const uint8 gender = urand(0, 1) ? GENDER_MALE : GENDER_FEMALE;
     const auto raceAndGender = CombineRaceAndGender(race, gender);
 
@@ -462,6 +493,13 @@ void RandomPlayerbotFactory::CreateRandomBots()
 {
     /* multi-thread here is meaningless? since the async db operations */
 
+    bool progressionPoolEnabled = sConfigMgr->GetOption<bool>("AiPlayerbot.ProgressionEnabled", false);
+    if (progressionPoolEnabled && sPlayerbotAIConfig.deleteRandomBotAccounts)
+    {
+        LOG_ERROR("playerbots", "Persistent progression cannot create its cohort while DeleteRandomBotAccounts is enabled.");
+        return;
+    }
+
     if (sPlayerbotAIConfig.deleteRandomBotAccounts)
     {
         // Collect bot account ids from the login database so the cleanup below
@@ -606,12 +644,15 @@ void RandomPlayerbotFactory::CreateRandomBots()
     }
 
     LOG_INFO("playerbots", "Creating random bot accounts...");
+    uint32 progressionPoolSize = sConfigMgr->GetOption<uint32>("AiPlayerbot.ProgressionPoolSize", 80);
     std::unordered_map<NameRaceAndGender, std::vector<std::string>> nameCache;
     std::vector<std::future<void>> account_creations;
     int account_creation = 0;
 
     // Calculates the total number of required accounts.
     uint32 totalAccountCount = CalculateTotalAccountCount();
+    if (progressionPoolEnabled)
+        totalAccountCount = std::max(totalAccountCount, (progressionPoolSize + 8) / 9);
     uint32 timer = getMSTime();
 
     for (uint32 accountNumber = 0; accountNumber < totalAccountCount; ++accountNumber)
@@ -657,6 +698,35 @@ void RandomPlayerbotFactory::CreateRandomBots()
 
     LOG_INFO("playerbots", "Creating random bot characters...");
     uint32 totalRandomBotChars = 0;
+    sPlayerbotAIConfig.randomBotAccounts.clear();
+    if (progressionPoolEnabled)
+        for (uint32 accountNumber = 0; accountNumber < totalAccountCount; ++accountNumber)
+        {
+            std::ostringstream out;
+            out << sPlayerbotAIConfig.randomBotAccountPrefix << accountNumber;
+            LoginDatabasePreparedStatement* stmt = LoginDatabase.GetPreparedStatement(LOGIN_GET_ACCOUNT_ID_BY_USERNAME);
+            stmt->SetData(0, out.str());
+            if (PreparedQueryResult result = LoginDatabase.Query(stmt))
+                sPlayerbotAIConfig.randomBotAccounts.push_back(result->Fetch()[0].Get<uint32>());
+        }
+
+    std::unordered_map<uint8, uint32> raceCounts;
+    uint32 eligibleCharacterCount = 0;
+    if (progressionPoolEnabled)
+        for (uint32 accountId : sPlayerbotAIConfig.randomBotAccounts)
+        {
+            QueryResult existing = CharacterDatabase.Query(
+                "SELECT race FROM characters WHERE account={} AND class <> {}", accountId, CLASS_DEATH_KNIGHT);
+            if (!existing)
+                continue;
+            do
+            {
+                uint8 race = existing->Fetch()[0].Get<uint8>();
+                ++raceCounts[race];
+                ++eligibleCharacterCount;
+            } while (existing->NextRow());
+        }
+
     std::vector<std::pair<Player*, uint32>> playerBots;
     std::vector<WorldSession*> sessionBots;
     int bot_creation = 0;
@@ -677,12 +747,25 @@ void RandomPlayerbotFactory::CreateRandomBots()
         Field* fields = result->Fetch();
         uint32 accountId = fields[0].Get<uint32>();
 
-        sPlayerbotAIConfig.randomBotAccounts.push_back(accountId);
+        if (!progressionPoolEnabled)
+            sPlayerbotAIConfig.randomBotAccounts.push_back(accountId);
 
         uint32 count = AccountMgr::GetCharactersCount(accountId);
         if (count >= 10)
         {
             continue;
+        }
+
+        std::unordered_set<uint8> existingClasses;
+        if (progressionPoolEnabled)
+        {
+            QueryResult existingClassRows =
+                CharacterDatabase.Query("SELECT class FROM characters WHERE account={}", accountId);
+            if (existingClassRows)
+                do
+                {
+                    existingClasses.insert(existingClassRows->Fetch()[0].Get<uint8>());
+                } while (existingClassRows->NextRow());
         }
 
         if (!nameCached)
@@ -721,17 +804,24 @@ void RandomPlayerbotFactory::CreateRandomBots()
                                                 time_t(0), LOCALE_enUS, 0, false, false, 0, true);
         sessionBots.push_back(session);
 
-        for (uint8 cls = CLASS_WARRIOR; cls < MAX_CLASSES - count; ++cls)
+        uint8 classLoopLimit = progressionPoolEnabled ? MAX_CLASSES : MAX_CLASSES - count;
+        for (uint8 cls = CLASS_WARRIOR;
+             cls < classLoopLimit &&
+             (!progressionPoolEnabled || (count < 10 && eligibleCharacterCount < progressionPoolSize));
+             ++cls)
         {
             // skip nonexistent classes
             if (!((1 << (cls - 1)) & CLASSMASK_ALL_PLAYABLE) || !sChrClassesStore.LookupEntry(cls))
+                continue;
+
+            if (progressionPoolEnabled && (cls == CLASS_DEATH_KNIGHT || existingClasses.contains(cls)))
                 continue;
 
             // skip disabled with config classes
             if ((1 << (cls - 1)) & sWorld->getIntConfig(CONFIG_CHARACTER_CREATING_DISABLED_CLASSMASK))
                 continue;
 
-            Player* playerBot = factory.CreateRandomBot(session, cls, nameCache);
+            Player* playerBot = factory.CreateRandomBot(session, cls, nameCache, raceCounts, progressionPoolEnabled);
             if (!playerBot)
             {
                 LOG_ERROR("playerbots", "Fail to create character for account {}", accountId);
@@ -739,6 +829,13 @@ void RandomPlayerbotFactory::CreateRandomBots()
             }
 
             playerBot->SaveToDB(true, false);
+            if (progressionPoolEnabled)
+            {
+                ++raceCounts[playerBot->getRace()];
+                ++eligibleCharacterCount;
+                ++count;
+                existingClasses.insert(cls);
+            }
             sCharacterCache->AddCharacterCacheEntry(playerBot->GetGUID(), accountId, playerBot->GetName(),
                                                     playerBot->getGender(), playerBot->getRace(),
                                                     playerBot->getClass(), playerBot->GetLevel());

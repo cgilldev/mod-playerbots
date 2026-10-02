@@ -5,13 +5,28 @@
  */
 
 #include "RandomPlayerbotMgr.h"
-#include "PlayerbotsDatabase.h"
+
+#include <sys/stat.h>
+
+#include <algorithm>
+#include <boost/thread/thread.hpp>
+#include <cstdlib>
+#include <ctime>
+#include <fstream>
+#include <iomanip>
+#include <limits>
+#include <random>
+#include <set>
+#include <tuple>
+#include <utility>
+
 #include "AiFactory.h"
 #include "Battleground.h"
 #include "BattlegroundMgr.h"
 #include "Cell.h"
 #include "CellImpl.h"
 #include "ChannelMgr.h"
+#include "Config.h"
 #include "DBCStores.h"
 #include "DBCStructure.h"
 #include "DatabaseEnv.h"
@@ -30,8 +45,11 @@
 #include "PlayerbotAIConfig.h"
 #include "PlayerbotFactory.h"
 #include "PlayerbotTextMgr.h"
+#include "PlayerbotWorldThreadProcessor.h"
 #include "Playerbots.h"
+#include "PlayerbotsDatabase.h"
 #include "Position.h"
+#include "ProgressionSessionPolicy.h"
 #include "RaceMgr.h"
 #include "Random.h"
 #include "RandomPlayerbotFactory.h"
@@ -39,16 +57,10 @@
 #include "SharedDefines.h"
 #include "TravelMgr.h"
 #include "Unit.h"
+#include "UpdateTime.h"
 #include "World.h"
+#include "WorldSession.h"
 #include "WorldSessionMgr.h"
-#include <algorithm>
-#include <boost/thread/thread.hpp>
-#include <cstdlib>
-#include <ctime>
-#include <iomanip>
-#include <random>
-#include <set>
-#include <utility>
 
 struct GuidClassRaceInfo
 {
@@ -56,6 +68,78 @@ struct GuidClassRaceInfo
     uint32 rClass;
     uint32 rRace;
 };
+
+static std::set<std::pair<uint32, uint32>> progressionZoneAdjacency = {
+    {3430, 3433},                                                 // Eversong Woods - Ghostlands
+    {14, 17},     {17, 215}, {17, 331}, {17, 406},                // Durotar/Mulgore - Barrens routes
+    {85, 130},                                                    // Tirisfal - Silverpine
+    {12, 40},     {12, 44},  {1, 38},   {141, 148}, {3524, 3525}  // Alliance starting routes
+};
+
+static void LoadProgressionZoneAdjacency()
+{
+    std::string configured = sConfigMgr->GetOption<std::string>("AiPlayerbot.ProgressionAdjacentZones", "");
+    size_t start = 0;
+    while (start < configured.size())
+    {
+        size_t end = configured.find(',', start);
+        std::string edge = configured.substr(start, end == std::string::npos ? end : end - start);
+        size_t separator = edge.find('-');
+        if (separator == std::string::npos)
+        {
+            LOG_ERROR("playerbots", "Ignoring invalid progression adjacency '{}'; expected zone-zone.", edge);
+        }
+        else
+        {
+            try
+            {
+                size_t firstChars = 0;
+                size_t secondChars = 0;
+                unsigned long firstValue = std::stoul(edge.substr(0, separator), &firstChars);
+                unsigned long secondValue = std::stoul(edge.substr(separator + 1), &secondChars);
+                if (firstChars != separator || secondChars != edge.size() - separator - 1 ||
+                    firstValue > std::numeric_limits<uint32>::max() ||
+                    secondValue > std::numeric_limits<uint32>::max() || firstValue == secondValue)
+                {
+                    LOG_ERROR("playerbots", "Ignoring invalid progression adjacency '{}'.", edge);
+                }
+                else
+                {
+                    uint32 first = static_cast<uint32>(firstValue);
+                    uint32 second = static_cast<uint32>(secondValue);
+                    progressionZoneAdjacency.insert({std::min(first, second), std::max(first, second)});
+                }
+            }
+            catch (std::exception const&)
+            {
+                LOG_ERROR("playerbots", "Ignoring invalid progression adjacency '{}'.", edge);
+            }
+        }
+        if (end == std::string::npos)
+            break;
+        start = end + 1;
+    }
+}
+
+static bool AreAdjacentProgressionZones(uint32 first, uint32 second)
+{
+    return progressionZoneAdjacency.contains({std::min(first, second), std::max(first, second)});
+}
+
+static bool IsOutdoorWorldMap(uint32 map)
+{
+    // The four persistent outdoor world maps in the WotLK client. All other
+    // maps are instanceable or battlegrounds and are never autonomous spawns.
+    return map == 0 || map == 1 || map == 530 || map == 571;
+}
+
+static bool IsProgressionStarterZone(uint32 zone)
+{
+    static std::unordered_set<uint32> const starterZones = {
+        1, 12, 14, 85, 141, 215, 3430, 3524
+    };
+    return starterZones.contains(zone);
+}
 
 void PrintStatsThread() { sRandomPlayerbotMgr.PrintStats(); }
 
@@ -289,6 +373,8 @@ void RandomPlayerbotMgr::UpdateAIInternal(uint32 /*elapsed*/, bool /*minimal*/)
     if (!sPlayerbotAIConfig.randomBotAutologin || !sPlayerbotAIConfig.enabled)
         return;
 
+    UpdateProgression();
+
     /*if (sPlayerbotAIConfig.enablePrototypePerformanceDiff)
     {
         LOG_INFO("playerbots", "---------------------------------------");
@@ -298,7 +384,9 @@ void RandomPlayerbotMgr::UpdateAIInternal(uint32 /*elapsed*/, bool /*minimal*/)
         ScaleBotActivity();
     }*/
 
-    uint32 maxAllowedBotCount = GetEventValue(0, "bot_count");
+    uint32 maxAllowedBotCount = progressionEnabled
+                                    ? sConfigMgr->GetOption<uint32>("AiPlayerbot.ProgressionActiveTarget", 16)
+                                    : GetEventValue(0, "bot_count");
     if (!maxAllowedBotCount || (maxAllowedBotCount < sPlayerbotAIConfig.minRandomBots ||
                                 maxAllowedBotCount > sPlayerbotAIConfig.maxRandomBots))
     {
@@ -306,6 +394,15 @@ void RandomPlayerbotMgr::UpdateAIInternal(uint32 /*elapsed*/, bool /*minimal*/)
         SetEventValue(0, "bot_count", maxAllowedBotCount,
                       urand(sPlayerbotAIConfig.randomBotCountChangeMinInterval,
                             sPlayerbotAIConfig.randomBotCountChangeMaxInterval));
+    }
+
+    if (progressionEnabled)
+    {
+        maxAllowedBotCount = ProgressionSessionPolicy::ActiveBotTarget(
+            offlineProgressionState == PROGRESSION_RUNNING, HasRealPlayerOnline(),
+            sConfigMgr->GetOption<uint32>("AiPlayerbot.ProgressionActiveTarget", 16),
+            sConfigMgr->GetOption<uint32>("AiPlayerbot.ProgressionPoolSize", 80),
+            static_cast<uint32>(progressionCohort.size()));
     }
 
     GetBots();
@@ -336,7 +433,7 @@ void RandomPlayerbotMgr::UpdateAIInternal(uint32 /*elapsed*/, bool /*minimal*/)
     bool realPlayerIsLogged = false;
     if (sPlayerbotAIConfig.disabledWithoutRealPlayer)
     {
-        if (sWorldSessionMgr->GetActiveAndQueuedSessionCount() > 0)
+        if (HasRealPlayerOnline())
         {
             RealPlayerLastTimeSeen = time(nullptr);
             realPlayerIsLogged = true;
@@ -353,7 +450,8 @@ void RandomPlayerbotMgr::UpdateAIInternal(uint32 /*elapsed*/, bool /*minimal*/)
                 DelayLoginBotsTimer = 0;
             }
 
-            if (RealPlayerLastTimeSeen != 0 && onlineBotCount > 0 &&
+            if (!progressionEnabled && offlineProgressionState != PROGRESSION_RUNNING && RealPlayerLastTimeSeen != 0 &&
+                onlineBotCount > 0 &&
                 time(nullptr) > RealPlayerLastTimeSeen + sPlayerbotAIConfig.disabledWithoutRealPlayerLogoutDelay)
             {
                 LogoutAllBots();
@@ -363,7 +461,8 @@ void RandomPlayerbotMgr::UpdateAIInternal(uint32 /*elapsed*/, bool /*minimal*/)
 
         if (availableBotCount < maxAllowedBotCount &&
             (sPlayerbotAIConfig.disabledWithoutRealPlayer == false ||
-             (realPlayerIsLogged && DelayLoginBotsTimer != 0 && time(nullptr) >= DelayLoginBotsTimer)))
+             (realPlayerIsLogged && DelayLoginBotsTimer != 0 && time(nullptr) >= DelayLoginBotsTimer) ||
+             offlineProgressionState == PROGRESSION_RUNNING))
         {
             AddRandomBots();
         }
@@ -408,7 +507,8 @@ void RandomPlayerbotMgr::UpdateAIInternal(uint32 /*elapsed*/, bool /*minimal*/)
     uint32 maxNewBots =
         onlineBotCount < maxAllowedBotCount &&
                 (sPlayerbotAIConfig.disabledWithoutRealPlayer == false ||
-                 (realPlayerIsLogged && DelayLoginBotsTimer != 0 && time(nullptr) >= DelayLoginBotsTimer))
+                 (realPlayerIsLogged && DelayLoginBotsTimer != 0 && time(nullptr) >= DelayLoginBotsTimer) ||
+                 (offlineProgressionState == PROGRESSION_RUNNING && !realPlayerIsLogged))
             ? maxAllowedBotCount - onlineBotCount
             : 0;
     uint32 loginBots = std::min(sPlayerbotAIConfig.randomBotsPerInterval - updateBots, maxNewBots);
@@ -463,6 +563,621 @@ void RandomPlayerbotMgr::UpdateAIInternal(uint32 /*elapsed*/, bool /*minimal*/)
     {
         LogPlayerLocation();
     }
+}
+
+void RandomPlayerbotMgr::ObserveWorldUpdate()
+{
+    time_t now = time(nullptr);
+    if (!worldUpdateWindowStart)
+        worldUpdateWindowStart = now;
+    // The most recently completed World::Update includes all world and map work.
+    // The tick interval passed to OnUpdate also includes sleep and is not a duration.
+    uint32 duration = sWorldUpdateTime.GetLastUpdateDuration();
+    if (duration)
+    {
+        worldUpdateDiffSum += duration;
+        ++worldUpdateDiffSamples;
+    }
+    if (now - worldUpdateWindowStart >= 60 && worldUpdateDiffSamples)
+    {
+        worldUpdateAverage = static_cast<uint32>(worldUpdateDiffSum / worldUpdateDiffSamples);
+        worldUpdateDiffSum = 0;
+        worldUpdateDiffSamples = 0;
+        worldUpdateWindowStart = now;
+    }
+}
+
+bool RandomPlayerbotMgr::HasRealPlayerOnline() const
+{
+    for (auto const& sessionEntry : sWorldSessionMgr->GetAllSessions())
+    {
+        WorldSession* session = sessionEntry.second;
+        if (!session || session->IsBot())
+            continue;
+        Player* player = session->GetPlayer();
+        if (player && player->IsInWorld() && !player->IsGameMaster())
+            return true;
+    }
+    return false;
+}
+
+uint32 RandomPlayerbotMgr::CountCappedCohortBots()
+{
+    uint8 ceiling = progressionLevelCeiling.load();
+    if (!ceiling || progressionCohort.empty())
+        return 0;
+    std::string guids;
+    for (uint32 guid : progressionCohort)
+    {
+        if (!guids.empty())
+            guids += ',';
+        guids += std::to_string(guid);
+    }
+    QueryResult result =
+        CharacterDatabase.Query("SELECT COUNT(*) FROM characters WHERE guid IN ({}) AND class <> {} AND level = {}",
+                                guids, CLASS_DEATH_KNIGHT, ceiling);
+    return result ? result->Fetch()[0].Get<uint32>() : 0;
+}
+
+void RandomPlayerbotMgr::PersistProgressionSession()
+{
+    PlayerbotsDatabase.Execute(
+        "UPDATE playerbot_progression_state SET session_state={}, session_seconds={}, updated_at={} WHERE id=1",
+        offlineProgressionState.load(), offlineProgressionSeconds.load(), static_cast<uint32>(time(nullptr)));
+}
+
+void RandomPlayerbotMgr::StopOfflineProgression(uint32 state, char const* reason)
+{
+    offlineProgressionState = state;
+    offlineProgressionLastUpdate = 0;
+    if (offlineActivityOverride)
+    {
+        sPlayerbotAIConfig.botActiveAlone = normalBotActiveAlone;
+        offlineActivityOverride = false;
+    }
+    PersistProgressionSession();
+    LOG_INFO("playerbots", "Offline progression state changed to {}: {}", state, reason);
+}
+
+void RandomPlayerbotMgr::ArmOfflineProgression()
+{
+    static_assert(PROGRESSION_ARMED == ProgressionSessionPolicy::Armed);
+    static_assert(PROGRESSION_RUNNING == ProgressionSessionPolicy::Running);
+    static_assert(PROGRESSION_COMPLETED == ProgressionSessionPolicy::Completed);
+    static_assert(PROGRESSION_CANCELLED == ProgressionSessionPolicy::Cancelled);
+    static_assert(PROGRESSION_SAFETY_STOPPED == ProgressionSessionPolicy::SafetyStopped);
+
+    if (!progressionEnabled || !progressionReady.load() || offlineProgressionState == PROGRESSION_COMPLETED)
+    {
+        LOG_ERROR("playerbots",
+                  "Offline progression arm rejected: progression is disabled, unready, or already completed.");
+        return;
+    }
+    if (offlineProgressionState == PROGRESSION_ARMED || offlineProgressionState == PROGRESSION_RUNNING)
+        return;
+
+    uint32 maxHours = sConfigMgr->GetOption<uint32>("AiPlayerbot.OfflineProgressionMaxHours", 12);
+    if (!maxHours || maxHours > 12)
+    {
+        LOG_ERROR("playerbots", "Offline progression arm rejected: duration must be between 1 and 12 hours.");
+        return;
+    }
+
+    uint32 armState = ProgressionSessionPolicy::Arm(offlineProgressionState.load(), CountCappedCohortBots() != 0);
+    if (armState == PROGRESSION_COMPLETED)
+    {
+        offlineProgressionSeconds.store(0);
+        StopOfflineProgression(armState, "an eligible cohort bot was already at the ceiling when armed");
+        return;
+    }
+
+    std::string hostMemoryFile = sConfigMgr->GetOption<std::string>("AiPlayerbot.OfflineProgressionHostMemoryFile",
+                                                                    "/run/playerbots/host-memavailable-kib");
+    struct stat monitorStat
+    {
+    };
+    uint64 hostAvailableKiB = 0;
+    std::ifstream hostMemoryStream(hostMemoryFile);
+    uint32 hostMinMiB = sConfigMgr->GetOption<uint32>("AiPlayerbot.OfflineProgressionHostMinAvailableMemory", 1024);
+    if (hostMemoryFile.empty() || stat(hostMemoryFile.c_str(), &monitorStat) != 0 ||
+        time(nullptr) - monitorStat.st_mtime > 90 || !(hostMemoryStream >> hostAvailableKiB) ||
+        hostAvailableKiB < static_cast<uint64>(hostMinMiB) * 1024)
+    {
+        LOG_ERROR("playerbots",
+                  "Offline progression arm rejected: host memory monitor is missing, stale, or below threshold.");
+        return;
+    }
+
+    offlineProgressionSeconds.store(0);
+    offlineProgressionState.store(armState);
+    offlineProgressionLastUpdate = 0;
+    PersistProgressionSession();
+    LOG_INFO("playerbots", "Offline progression session armed for up to {} hours.", maxHours);
+}
+
+void RandomPlayerbotMgr::CancelOfflineProgression()
+{
+    uint32 cancelled = ProgressionSessionPolicy::Cancel(offlineProgressionState.load());
+    if (cancelled == offlineProgressionState)
+        return;
+    StopOfflineProgression(cancelled, "cancelled by a GM");
+}
+
+bool RandomPlayerbotMgr::RetireOneSafeBot(char const* reason)
+{
+    for (uint32 guid : currentBots)
+    {
+        ObjectGuid botGuid = ObjectGuid::Create<HighGuid::Player>(guid);
+        Player* bot = GetPlayerBot(botGuid);
+        PlayerbotAI* botAI = bot ? GET_PLAYERBOT_AI(bot) : nullptr;
+        if (!bot || !botAI || bot->GetGroup() || bot->IsInCombat() ||
+            botAI->HasPlayerNearby(sPlayerbotAIConfig.sightDistance))
+            continue;
+        bot->SaveToDB(false, false);
+        if (IsProgressionCohortBot(bot))
+            PlayerbotsDatabase.Execute(
+                "UPDATE playerbot_progression_session SET last_logout = UNIX_TIMESTAMP() WHERE guid = {}", guid);
+        SetEventValue(guid, "add", 0, 0);
+        SetEventValue(guid, "logout", 1, urand(1800, 5400));
+        LogoutPlayerBot(botGuid);
+        currentBots.erase(guid);
+        LOG_INFO("playerbots", "Retired bot {} safely: {}", guid, reason);
+        return true;
+    }
+    return false;
+}
+
+void RandomPlayerbotMgr::ObserveProgressionAnchor(Player* player)
+{
+    if (!progressionEnabled || !player)
+        return;
+    if (player->GetGUID().GetCounter() != progressionAnchor1 && player->GetGUID().GetCounter() != progressionAnchor2)
+        return;
+    uint8 observed = static_cast<uint8>(player->GetLevel());
+    uint8 cached = progressionLevelCeiling.load();
+    while (observed > cached && !progressionLevelCeiling.compare_exchange_weak(cached, observed))
+    {
+    }
+    if (observed > cached)
+        progressionCeilingDirty.store(true);
+}
+
+bool RandomPlayerbotMgr::IsProgressionManagedBot(Player* bot)
+{
+    return IsProgressionCohortBot(bot) && progressionReady.load() && bot->GetLevel() <= progressionLevelCeiling.load();
+}
+
+bool RandomPlayerbotMgr::IsProgressionCohortBot(Player* bot)
+{
+    return progressionEnabled && bot && bot->getClass() != CLASS_DEATH_KNIGHT &&
+           progressionCohort.contains(bot->GetGUID().GetCounter());
+}
+
+bool RandomPlayerbotMgr::IsProgressionPausedBot(Player* bot)
+{
+    if (!IsProgressionCohortBot(bot))
+        return false;
+    return !progressionReady.load() || !progressionLevelCeiling.load() ||
+           bot->GetLevel() >= progressionLevelCeiling.load();
+}
+
+bool RandomPlayerbotMgr::CanProgressCohortLevel(Player* bot, uint8 newLevel)
+{
+    if (!IsProgressionCohortBot(bot))
+        return true;
+    uint8 ceiling = progressionLevelCeiling.load();
+    return progressionReady.load() && ceiling && bot->GetLevel() <= ceiling && newLevel <= ceiling;
+}
+
+void RandomPlayerbotMgr::InitializeProgression()
+{
+    progressionReady.store(false);
+    progressionLevelCeiling.store(0);
+    progressionEnabled = sConfigMgr->GetOption<bool>("AiPlayerbot.ProgressionEnabled", false);
+    normalBotActiveAlone = sPlayerbotAIConfig.botActiveAlone;
+    if (!progressionEnabled)
+    {
+        LOG_INFO("playerbots", "Persistent progression controls are disabled by configuration.");
+        return;
+    }
+    progressionAnchor1 = sConfigMgr->GetOption<uint32>("AiPlayerbot.ProgressionAnchor1", 5);
+    progressionAnchor2 = sConfigMgr->GetOption<uint32>("AiPlayerbot.ProgressionAnchor2", 6);
+    LoadProgressionZoneAdjacency();
+    QueryResult state = PlayerbotsDatabase.Query(
+        "SELECT level_ceiling, session_state, session_seconds, anchor1_guid, anchor2_guid, "
+        "anchor1_zone, anchor1_map, anchor2_zone, anchor2_map "
+        "FROM playerbot_progression_state WHERE id=1");
+    if (state)
+    {
+        Field* fields = state->Fetch();
+        progressionLevelCeiling.store(fields[0].Get<uint8>());
+        offlineProgressionState = fields[1].Get<uint32>();
+        offlineProgressionSeconds = fields[2].Get<uint32>();
+        uint32 savedAnchor1 = fields[3].Get<uint32>();
+        uint32 savedAnchor2 = fields[4].Get<uint32>();
+        progressionAnchor1Zone = fields[5].Get<uint32>();
+        progressionAnchor1Map = fields[6].Get<uint32>();
+        progressionAnchor2Zone = fields[7].Get<uint32>();
+        progressionAnchor2Map = fields[8].Get<uint32>();
+        if ((savedAnchor1 && savedAnchor1 != progressionAnchor1) ||
+            (savedAnchor2 && savedAnchor2 != progressionAnchor2))
+            LOG_INFO("playerbots", "Progression anchor configuration changed from saved GUIDs {} and {} to {} and {}.",
+                     savedAnchor1, savedAnchor2, progressionAnchor1, progressionAnchor2);
+    }
+    UpdateProgression();
+
+    uint32 createdAt = static_cast<uint32>(time(nullptr));
+    QueryResult accounts =
+        PlayerbotsDatabase.Query("SELECT account_id FROM playerbots_account_type WHERE account_type=1");
+    if (accounts)
+    {
+        do
+        {
+            uint32 accountId = accounts->Fetch()[0].Get<uint32>();
+            QueryResult characters = CharacterDatabase.Query(
+                "SELECT guid, race FROM characters WHERE account={} AND class <> {}", accountId, CLASS_DEATH_KNIGHT);
+            if (!characters)
+                continue;
+            do
+            {
+                Field* fields = characters->Fetch();
+                PlayerbotsDatabase.Execute(
+                    "INSERT IGNORE INTO playerbot_progression_cohort (guid, race, created_at) VALUES ({}, {}, {})",
+                    fields[0].Get<uint32>(), fields[1].Get<uint8>(), createdAt);
+                progressionCohort.insert(fields[0].Get<uint32>());
+            } while (characters->NextRow());
+        } while (accounts->NextRow());
+    }
+
+    QueryResult scheduledLogins = PlayerbotsDatabase.Query(
+        "SELECT guid, next_login_at, minimum_end FROM playerbot_progression_session "
+        "WHERE next_login_at > UNIX_TIMESTAMP() OR minimum_end > UNIX_TIMESTAMP()");
+    if (scheduledLogins)
+    {
+        do
+        {
+            Field* fields = scheduledLogins->Fetch();
+            progressionLoginNotBefore[fields[0].Get<uint32>()] = fields[1].Get<uint32>();
+            progressionMinimumEnd[fields[0].Get<uint32>()] = fields[2].Get<uint32>();
+        } while (scheduledLogins->NextRow());
+    }
+}
+
+void RandomPlayerbotMgr::UpdateProgression()
+{
+    if (!progressionEnabled)
+        return;
+    time_t now = time(nullptr);
+    bool refreshAnchors = !progressionCheckTime || now >= progressionCheckTime + 60;
+    bool ceilingDirty = progressionCeilingDirty.exchange(false);
+    if (!refreshAnchors && !ceilingDirty && progressionRoutineCheckTime && now < progressionRoutineCheckTime + 5)
+        return;
+    progressionRoutineCheckTime = now;
+    if (refreshAnchors)
+        progressionCheckTime = static_cast<uint32>(now);
+
+    uint32 first = progressionAnchor1;
+    uint32 second = progressionAnchor2;
+    uint8 observed = 0;
+    if (refreshAnchors)
+    {
+        QueryResult anchors = CharacterDatabase.Query(
+            "SELECT guid, level, zone, map FROM characters WHERE guid IN ({}, {})", first, second);
+        if (anchors)
+        {
+            do
+            {
+                Field* fields = anchors->Fetch();
+                uint32 guid = fields[0].Get<uint32>();
+                observed = std::max(observed, fields[1].Get<uint8>());
+                if (guid == first)
+                {
+                    progressionAnchor1Zone = fields[2].Get<uint32>();
+                    progressionAnchor1Map = fields[3].Get<uint32>();
+                }
+                else if (guid == second)
+                {
+                    progressionAnchor2Zone = fields[2].Get<uint32>();
+                    progressionAnchor2Map = fields[3].Get<uint32>();
+                }
+            } while (anchors->NextRow());
+        }
+    }
+
+    uint8 saved = progressionLevelCeiling.load();
+    uint8 ceiling = std::max(saved, observed);
+    if (ceiling)
+    {
+        progressionLevelCeiling.store(ceiling);
+        progressionReady.store(true);
+        if (refreshAnchors || ceilingDirty || ceiling > saved)
+            PlayerbotsDatabase.Execute(
+                "UPDATE playerbot_progression_state SET level_ceiling={}, anchor1_guid={}, anchor2_guid={}, "
+                "anchor1_zone={}, anchor1_map={}, anchor2_zone={}, anchor2_map={}, updated_at={} WHERE id=1",
+                ceiling, first, second, progressionAnchor1Zone, progressionAnchor1Map,
+                progressionAnchor2Zone, progressionAnchor2Map, static_cast<uint32>(now));
+    }
+    else
+    {
+        progressionReady.store(false);
+        LOG_ERROR("playerbots",
+                  "Progression is fail-closed: neither configured anchor {} nor {} has a saved character, and no "
+                  "ceiling is persisted.",
+                  first, second);
+    }
+
+    if (!lastProgressionSummary || now >= lastProgressionSummary + 300)
+    {
+        lastProgressionSummary = now;
+        std::map<std::pair<uint32, uint8>, uint32> byZoneAndLevel;
+        for (uint32 guid : currentBots)
+        {
+            Player* bot = GetPlayerBot(ObjectGuid::Create<HighGuid::Player>(guid));
+            if (bot && IsProgressionCohortBot(bot))
+                ++byZoneAndLevel[{bot->GetZoneId(), bot->GetLevel()}];
+        }
+        std::string population;
+        for (auto const& [zoneLevel, count] : byZoneAndLevel)
+            population += std::to_string(zoneLevel.first) + ":" + std::to_string(zoneLevel.second) + "=" +
+                std::to_string(count) + " ";
+        LOG_INFO("playerbots", "Progression population: {} active, ceiling {}, world update average {} ms; zone:level=count [{}].",
+                 currentBots.size(), ceiling, worldUpdateAverage, population);
+    }
+
+    // World-loop interval is the available low-cost proxy for update pressure.
+    if (worldUpdateAverage > 100)
+    {
+        performanceAdmissionPaused = true;
+        lowUpdateSince = 0;
+    }
+    else if (performanceAdmissionPaused && worldUpdateAverage < 50)
+    {
+        if (!lowUpdateSince)
+            lowUpdateSince = now;
+        else if (now - lowUpdateSince >= 300)
+        {
+            performanceAdmissionPaused = false;
+            lowUpdateSince = 0;
+            LOG_INFO("playerbots",
+                     "Bot admissions resumed after five minutes below 50 ms average world-loop interval.");
+        }
+    }
+    else if (worldUpdateAverage >= 50)
+        lowUpdateSince = 0;
+
+    uint32 activeFloor = std::min<uint32>(sConfigMgr->GetOption<uint32>("AiPlayerbot.ProgressionActiveFloor", 12),
+                                          sConfigMgr->GetOption<uint32>("AiPlayerbot.ProgressionActiveTarget", 16));
+    if (worldUpdateAverage > 100 && currentBots.size() > activeFloor &&
+        (!lastPopulationScale || now >= lastPopulationScale + 60))
+    {
+        lastPopulationScale = now;
+        if (!RetireOneSafeBot("reducing the population under update pressure"))
+            LOG_WARN("playerbots",
+                     "Update pressure is above 100 ms, but no ungrouped, safe bot can be retired; admissions remain "
+                     "stopped.");
+    }
+
+    if (offlineProgressionState == PROGRESSION_COMPLETED && !HasRealPlayerOnline() && !currentBots.empty() &&
+        (!lastPopulationScale || now >= lastPopulationScale + 60))
+    {
+        lastPopulationScale = now;
+        if (!RetireOneSafeBot("the one-time offline progression session is complete"))
+            LOG_WARN("playerbots",
+                     "Progression completed, but active bot groups or nearby players prevent safe retirement.");
+    }
+
+    if (progressionEnabled && offlineProgressionState != PROGRESSION_RUNNING && !HasRealPlayerOnline() &&
+        RealPlayerLastTimeSeen &&
+        now > RealPlayerLastTimeSeen + sPlayerbotAIConfig.disabledWithoutRealPlayerLogoutDelay &&
+        !currentBots.empty() && (!lastPopulationScale || now >= lastPopulationScale + 60))
+    {
+        lastPopulationScale = now;
+        if (!RetireOneSafeBot("returning to player-required operation"))
+            LOG_WARN("playerbots", "No ungrouped, out-of-combat bot away from real players can be retired safely.");
+    }
+
+    if (offlineProgressionState != PROGRESSION_ARMED && offlineProgressionState != PROGRESSION_RUNNING)
+        return;
+
+    auto stopByPolicy = [&](bool cappedBot, bool safetyStop, char const* reason)
+    {
+        auto transition = ProgressionSessionPolicy::Advance(
+            {offlineProgressionState.load(), offlineProgressionSeconds.load(),
+             static_cast<uint32>(offlineProgressionLastUpdate)},
+            {static_cast<uint32>(now), 0, false, cappedBot, safetyStop});
+        StopOfflineProgression(transition.state, reason);
+    };
+
+    if (CountCappedCohortBots())
+    {
+        stopByPolicy(true, false, "an eligible cohort bot reached the anchor ceiling");
+        return;
+    }
+
+    std::string hostMemoryFile = sConfigMgr->GetOption<std::string>("AiPlayerbot.OfflineProgressionHostMemoryFile",
+                                                                    "/run/playerbots/host-memavailable-kib");
+    struct stat monitorStat
+    {
+    };
+    uint64 hostAvailableKiB = 0;
+    std::ifstream hostMemoryStream(hostMemoryFile);
+    bool monitorAvailable = !hostMemoryFile.empty() && stat(hostMemoryFile.c_str(), &monitorStat) == 0 &&
+                            now - monitorStat.st_mtime <= 90 && static_cast<bool>(hostMemoryStream >> hostAvailableKiB);
+    if (!monitorAvailable)
+    {
+        stopByPolicy(false, true, "host memory safety monitor is missing or stale");
+        return;
+    }
+
+    uint64 guestAvailableKiB = 0;
+    std::ifstream memInfo("/proc/meminfo");
+    std::string line;
+    while (std::getline(memInfo, line))
+    {
+        if (line.rfind("MemAvailable:", 0) == 0)
+        {
+            std::istringstream values(line.substr(13));
+            values >> guestAvailableKiB;
+            break;
+        }
+    }
+    if (!guestAvailableKiB)
+    {
+        stopByPolicy(false, true, "guest memory monitor is unavailable");
+        return;
+    }
+
+    uint32 guestMinMiB = sConfigMgr->GetOption<uint32>("AiPlayerbot.OfflineProgressionMinAvailableMemory", 512);
+    uint32 hostMinMiB = sConfigMgr->GetOption<uint32>("AiPlayerbot.OfflineProgressionHostMinAvailableMemory", 1024);
+    if (guestAvailableKiB < static_cast<uint64>(guestMinMiB) * 1024)
+    {
+        if (!guestMemoryPressureSince)
+            guestMemoryPressureSince = now;
+        else if (now - guestMemoryPressureSince >= 60)
+        {
+            stopByPolicy(false, true, "guest available memory remained below its safety threshold for 60 seconds");
+            return;
+        }
+    }
+    else
+        guestMemoryPressureSince = 0;
+
+    if (hostAvailableKiB < static_cast<uint64>(hostMinMiB) * 1024)
+    {
+        if (!hostMemoryPressureSince)
+            hostMemoryPressureSince = now;
+        else if (now - hostMemoryPressureSince >= 60)
+        {
+            stopByPolicy(false, true, "host available memory remained below its safety threshold for 60 seconds");
+            return;
+        }
+    }
+    else
+        hostMemoryPressureSince = 0;
+
+    if (worldUpdateAverage > 200)
+    {
+        if (!updatePressureSince)
+            updatePressureSince = now;
+        else if (now - updatePressureSince >= 60)
+        {
+            stopByPolicy(false, true, "world-update duration remained above 200 ms for 60 seconds");
+            return;
+        }
+    }
+    else
+        updatePressureSince = 0;
+
+    uint32 maxHours = sConfigMgr->GetOption<uint32>("AiPlayerbot.OfflineProgressionMaxHours", 12);
+    if (!maxHours || maxHours > 12)
+    {
+        stopByPolicy(false, true, "offline duration configuration is outside the 1 to 12 hour safety range");
+        return;
+    }
+
+    bool realPlayerOnline = HasRealPlayerOnline();
+    uint32 previousState = offlineProgressionState.load();
+    uint32 normalTarget = std::min<uint32>(16,
+        sConfigMgr->GetOption<uint32>("AiPlayerbot.ProgressionActiveTarget", 16));
+    if (previousState == PROGRESSION_RUNNING && realPlayerOnline && currentBots.size() > normalTarget &&
+        (!lastPopulationScale || now >= lastPopulationScale + 60))
+    {
+        lastPopulationScale = now;
+        if (!RetireOneSafeBot("restoring the normal player-session population"))
+            LOG_WARN("playerbots",
+                     "A real player returned during offline progression, but groups or nearby players prevent "
+                     "reducing the bot population; admissions remain capped at the normal target.");
+    }
+    auto transition = ProgressionSessionPolicy::Advance(
+        {previousState, offlineProgressionSeconds.load(), static_cast<uint32>(offlineProgressionLastUpdate)},
+        {static_cast<uint32>(now), maxHours * 3600, realPlayerOnline, false, false});
+    offlineProgressionSeconds.store(transition.seconds);
+    offlineProgressionLastUpdate = transition.lastUpdate;
+    if (transition.state == PROGRESSION_COMPLETED)
+    {
+        StopOfflineProgression(transition.state, "maximum offline runtime reached");
+        return;
+    }
+    offlineProgressionState.store(transition.state);
+    if (previousState != PROGRESSION_RUNNING && transition.state == PROGRESSION_RUNNING)
+        LOG_INFO("playerbots", "Offline progression session is now running.");
+    if (transition.state == PROGRESSION_RUNNING)
+        PersistProgressionSession();
+
+    bool allowAllOfflineActivity = transition.state == PROGRESSION_RUNNING && !realPlayerOnline;
+    if (allowAllOfflineActivity && !offlineActivityOverride)
+    {
+        sPlayerbotAIConfig.botActiveAlone = 100;
+        offlineActivityOverride = true;
+        LOG_INFO("playerbots", "Temporarily allowing full background bot activity for offline progression.");
+    }
+    else if (!allowAllOfflineActivity && offlineActivityOverride)
+    {
+        sPlayerbotAIConfig.botActiveAlone = normalBotActiveAlone;
+        offlineActivityOverride = false;
+        LOG_INFO("playerbots", "Restored normal background bot activity settings.");
+    }
+}
+
+class ProgressionSessionControlOperation final : public PlayerbotOperation
+{
+public:
+    explicit ProgressionSessionControlOperation(bool arm) : _arm(arm) {}
+    bool Execute() override
+    {
+        if (_arm)
+            sRandomPlayerbotMgr.ArmOfflineProgression();
+        else
+            sRandomPlayerbotMgr.CancelOfflineProgression();
+        return true;
+    }
+    uint32 GetPriority() const override { return 50; }
+    std::string GetName() const override { return "ProgressionSessionControl"; }
+
+private:
+    bool _arm;
+};
+
+bool RandomPlayerbotMgr::HandleProgressionCommand(ChatHandler* handler, char const* args)
+{
+    if (!handler)
+        return false;
+    if (!args || !*args || !strcmp(args, "status"))
+    {
+        uint8 ceiling = progressionLevelCeiling.load();
+        std::string sessionState = offlineProgressionState == PROGRESSION_DISARMED    ? "disarmed"
+                                   : offlineProgressionState == PROGRESSION_ARMED     ? "armed"
+                                   : offlineProgressionState == PROGRESSION_RUNNING   ? "running"
+                                   : offlineProgressionState == PROGRESSION_COMPLETED ? "completed"
+                                   : offlineProgressionState == PROGRESSION_CANCELLED ? "cancelled"
+                                                                                      : "safety-stopped";
+        handler->PSendSysMessage(
+            "Progression controls: {}; ceiling: {} ({}); offline session state: {}; runtime: {} seconds.",
+            progressionEnabled ? "enabled" : "disabled", ceiling, progressionReady.load() ? "ready" : "fail-closed",
+            sessionState, offlineProgressionSeconds.load());
+        LOG_INFO(
+            "playerbots",
+            "Progression status requested: enabled {}, ready {}, ceiling {}, offline state {}, runtime {} seconds.",
+            progressionEnabled, progressionReady.load(), ceiling, sessionState, offlineProgressionSeconds.load());
+        return true;
+    }
+    if (!strcmp(args, "cancel"))
+    {
+        PlayerbotWorldThreadProcessor::instance().QueueOperation(
+            std::make_unique<ProgressionSessionControlOperation>(false));
+        handler->PSendSysMessage("Offline progression cancellation queued on the world thread.");
+        return true;
+    }
+    if (!strcmp(args, "arm"))
+    {
+        PlayerbotWorldThreadProcessor::instance().QueueOperation(
+            std::make_unique<ProgressionSessionControlOperation>(true));
+        handler->PSendSysMessage(
+            "Offline progression arm request queued on the world thread; check status and logs for acceptance.");
+        return true;
+    }
+    handler->PSendSysMessage("Usage: .playerbots progress status|arm|cancel");
+    return false;
 }
 
 // void RandomPlayerbotMgr::ScaleBotActivity()
@@ -652,14 +1367,110 @@ bool RandomPlayerbotMgr::IsAccountType(uint32 accountId, uint8 accountType)
 // Phase 4 is reached if and only if the value of RandomBotAccountCount is lower than it should.
 uint32 RandomPlayerbotMgr::AddRandomBots()
 {
+    if (progressionEnabled && (!progressionReady.load() || performanceAdmissionPaused))
+        return 0;
+
+    if (progressionEnabled)
+    {
+        uint32 now = static_cast<uint32>(time(nullptr));
+        if (nextProgressionAdmission && now < nextProgressionAdmission)
+            return 0;
+        nextProgressionAdmission = now + 60;
+    }
+
     uint32 maxAllowedBotCount = GetEventValue(0, "bot_count");
+    if (progressionEnabled)
+    {
+        maxAllowedBotCount = ProgressionSessionPolicy::ActiveBotTarget(
+            offlineProgressionState == PROGRESSION_RUNNING, HasRealPlayerOnline(),
+            sConfigMgr->GetOption<uint32>("AiPlayerbot.ProgressionActiveTarget", 16),
+            sConfigMgr->GetOption<uint32>("AiPlayerbot.ProgressionPoolSize", 80),
+            static_cast<uint32>(progressionCohort.size()));
+    }
     static time_t missingBotsTimer = 0;
 
     if (currentBots.size() < maxAllowedBotCount)
     {
         // Calculate how many bots to add
         maxAllowedBotCount -= currentBots.size();
-        maxAllowedBotCount = std::min(sPlayerbotAIConfig.randomBotsPerInterval, maxAllowedBotCount);
+        maxAllowedBotCount = std::min<uint32>({2, sPlayerbotAIConfig.randomBotsPerInterval, maxAllowedBotCount});
+
+        struct OccupiedZone
+        {
+            uint32 zone;
+            uint32 map;
+            uint8 level;
+            TeamId team;
+        };
+        std::vector<OccupiedZone> occupiedZones;
+        std::unordered_set<uint32> onlineRealPlayers;
+        time_t zoneNow = time(nullptr);
+        for (auto const& sessionEntry : sWorldSessionMgr->GetAllSessions())
+        {
+            WorldSession* session = sessionEntry.second;
+            if (!session || session->IsBot())
+                continue;
+            Player* player = session->GetPlayer();
+            if (!player || !player->IsInWorld() || player->IsGameMaster())
+                continue;
+
+            uint32 playerGuid = player->GetGUID().GetCounter();
+            onlineRealPlayers.insert(playerGuid);
+            uint32 currentZone = player->GetZoneId();
+            if (!IsOutdoorWorldMap(player->GetMapId()))
+            {
+                MapEntry const* mapEntry = sMapStore.LookupEntry(player->GetMapId());
+                if (mapEntry && mapEntry->linked_zone)
+                    currentZone = mapEntry->linked_zone;
+            }
+            auto [stateIt, inserted] = playerZoneStates.try_emplace(playerGuid);
+            PlayerZoneState& state = stateIt->second;
+            if (inserted)
+            {
+                state.zone = currentZone;
+                state.map = player->GetMapId();
+            }
+            else if (currentZone != state.zone || player->GetMapId() != state.map)
+            {
+                if (state.pendingZone != currentZone)
+                {
+                    state.pendingZone = currentZone;
+                    state.pendingSince = zoneNow;
+                }
+                else if (zoneNow - state.pendingSince >= 120)
+                {
+                    state.zone = currentZone;
+                    state.map = player->GetMapId();
+                    state.pendingZone = 0;
+                    state.pendingSince = 0;
+                }
+            }
+            else
+            {
+                state.pendingZone = 0;
+                state.pendingSince = 0;
+            }
+            state.level = player->GetLevel();
+            state.team = player->GetTeamId();
+            occupiedZones.push_back({state.zone, state.map, state.level, state.team});
+        }
+        for (auto it = playerZoneStates.begin(); it != playerZoneStates.end();)
+        {
+            if (!onlineRealPlayers.contains(it->first))
+                it = playerZoneStates.erase(it);
+            else
+                ++it;
+        }
+
+        if (occupiedZones.empty() && offlineProgressionState == PROGRESSION_RUNNING)
+        {
+            uint8 ceiling = progressionLevelCeiling.load();
+            if (progressionAnchor1Zone && IsOutdoorWorldMap(progressionAnchor1Map))
+                occupiedZones.push_back({progressionAnchor1Zone, progressionAnchor1Map, ceiling, TEAM_HORDE});
+            if (progressionAnchor2Zone && IsOutdoorWorldMap(progressionAnchor2Map) &&
+                progressionAnchor2Zone != progressionAnchor1Zone)
+                occupiedZones.push_back({progressionAnchor2Zone, progressionAnchor2Map, ceiling, TEAM_HORDE});
+        }
 
         // Single RNG instance for all shuffling
         std::mt19937 rng(std::chrono::steady_clock::now().time_since_epoch().count());
@@ -707,15 +1518,17 @@ uint32 RandomPlayerbotMgr::AddRandomBots()
             uint8 rClass;
             uint8 rRace;
             uint32 accountId;
+            uint8 level;
+            uint32 map;
+            uint32 zone;
+            uint32 logoutTime;
         };
         std::vector<CharacterInfo> allCharacters;
 
         for (uint32 accountId : accountsToUse)
         {
-            CharacterDatabasePreparedStatement* stmt =
-                CharacterDatabase.GetPreparedStatement(CHAR_SEL_CHARS_BY_ACCOUNT_ID);
-            stmt->SetData(0, accountId);
-            PreparedQueryResult result = CharacterDatabase.Query(stmt);
+            QueryResult result = CharacterDatabase.Query(
+                "SELECT guid, class, race, level, map, zone, logout_time FROM characters WHERE account={}", accountId);
             if (!result)
                 continue;
 
@@ -727,11 +1540,16 @@ uint32 RandomPlayerbotMgr::AddRandomBots()
                 info.rClass = fields[1].Get<uint8>();
                 info.rRace = fields[2].Get<uint8>();
                 info.accountId = accountId;
+                info.level = fields[3].Get<uint8>();
+                info.map = fields[4].Get<uint32>();
+                info.zone = fields[5].Get<uint32>();
+                info.logoutTime = fields[6].Get<uint32>();
                 allCharacters.push_back(info);
             } while (result->NextRow());
         }
 
-        // Shuffle for class balance
+        // Randomize ties so equivalent candidates do not always appear in the
+        // same order, then prefer saved locations near stable player regions.
         std::shuffle(allCharacters.begin(), allCharacters.end(), rng);
 
         // Separate characters by faction for phased login
@@ -747,22 +1565,91 @@ uint32 RandomPlayerbotMgr::AddRandomBots()
                 hordeChars.push_back(charInfo);
         }
 
+        auto candidateRank = [&occupiedZones](CharacterInfo const& candidate)
+        {
+            uint32 regionRank = IsOutdoorWorldMap(candidate.map) ? 2 : 3;
+            uint32 levelDistance = UINT32_MAX;
+            for (OccupiedZone const& occupied : occupiedZones)
+            {
+                uint32 locationRank = candidate.zone == occupied.zone
+                                          ? 0
+                                          : (AreAdjacentProgressionZones(candidate.zone, occupied.zone) ? 1 : 2);
+                if (!IsOutdoorWorldMap(candidate.map))
+                    locationRank = 3;  // Never concentrate autonomous logins inside an instance.
+                if (locationRank < regionRank)
+                    regionRank = locationRank;
+                uint32 distance = candidate.level > occupied.level ? candidate.level - occupied.level
+                                                                   : occupied.level - candidate.level;
+                levelDistance = std::min(levelDistance, distance);
+            }
+            uint32 levelRank = levelDistance <= 3 ? 0 : (levelDistance == UINT32_MAX ? 1 : levelDistance - 2);
+            uint32 offlineRank = candidate.logoutTime;
+            return std::tuple<uint32, uint32, uint32>(regionRank, levelRank, offlineRank);
+        };
+        auto rankedBefore = [&candidateRank](CharacterInfo const& lhs, CharacterInfo const& rhs)
+        { return candidateRank(lhs) < candidateRank(rhs); };
+        std::stable_sort(allianceChars.begin(), allianceChars.end(), rankedBefore);
+        std::stable_sort(hordeChars.begin(), hordeChars.end(), rankedBefore);
+
+        uint32 admittedThisReconciliation = 0;
+
         // Lambda to handle bot login logic
         auto tryLoginBot = [&](CharacterInfo const& charInfo) -> bool
         {
-            if (GetEventValue(charInfo.guid, "add") ||
-                GetEventValue(charInfo.guid, "logout") ||
-                GetPlayerBot(charInfo.guid) ||
-                currentBots.contains(charInfo.guid) ||
-                (sPlayerbotAIConfig.disableDeathKnightLogin && charInfo.rClass == CLASS_DEATH_KNIGHT))
+            if (GetEventValue(charInfo.guid, "add") || GetEventValue(charInfo.guid, "logout") ||
+                GetPlayerBot(charInfo.guid) || currentBots.contains(charInfo.guid) ||
+                (sPlayerbotAIConfig.disableDeathKnightLogin && charInfo.rClass == CLASS_DEATH_KNIGHT) ||
+                (progressionEnabled && charInfo.rClass == CLASS_DEATH_KNIGHT))
             {
                 return false;
             }
+
+            if (progressionEnabled && !progressionCohort.contains(charInfo.guid))
+                return false;
+
+            if (progressionEnabled && !IsOutdoorWorldMap(charInfo.map))
+            {
+                LOG_DEBUG("playerbots", "Skipping bot {} with saved instance map {} during autonomous admission.",
+                          charInfo.guid, charInfo.map);
+                return false;
+            }
+
+            if (progressionEnabled && charInfo.rClass != CLASS_DEATH_KNIGHT && progressionReady.load() &&
+                charInfo.level > progressionLevelCeiling.load())
+            {
+                LOG_INFO("playerbots", "Skipping over-cap bot {} at level {} (ceiling {}).", charInfo.guid,
+                         charInfo.level, progressionLevelCeiling.load());
+                return false;
+            }
+
+            auto [regionRank, levelRank, offlineRank] = candidateRank(charInfo);
+            LOG_INFO("playerbots",
+                     "Admitting bot {} from saved zone {} level {} (region rank {}, level rank {}, offline rank {}).",
+                     charInfo.guid, charInfo.zone, charInfo.level, regionRank, levelRank, offlineRank);
 
             uint32 add_time = sPlayerbotAIConfig.enablePeriodicOnlineOffline
                                 ? urand(sPlayerbotAIConfig.minRandomBotInWorldTime,
                                         sPlayerbotAIConfig.maxRandomBotInWorldTime)
                                 : sPlayerbotAIConfig.permanentlyInWorldTime;
+            if (progressionEnabled)
+            {
+                uint32 minMinutes = sConfigMgr->GetOption<uint32>("AiPlayerbot.ProgressionSessionMinMinutes", 30);
+                uint32 maxMinutes = sConfigMgr->GetOption<uint32>("AiPlayerbot.ProgressionSessionMaxMinutes", 90);
+                if (maxMinutes < minMinutes)
+                    std::swap(minMinutes, maxMinutes);
+                add_time = urand(minMinutes, std::max(minMinutes, maxMinutes)) * 60;
+                uint32 admittedAt = static_cast<uint32>(time(nullptr));
+                uint32 nextLoginAt = admittedAt +
+                    (admittedThisReconciliation == 0 ? urand(0, 29) : urand(30, 59));
+                progressionLoginNotBefore[charInfo.guid] = nextLoginAt;
+                progressionMinimumEnd[charInfo.guid] = admittedAt + add_time;
+                PlayerbotsDatabase.Execute(
+                    "INSERT INTO playerbot_progression_session (guid, admitted_at, minimum_end, next_login_at) "
+                    "VALUES ({}, {}, {}, {}) ON DUPLICATE KEY UPDATE admitted_at = VALUES(admitted_at), "
+                    "minimum_end = VALUES(minimum_end), next_login_at = VALUES(next_login_at)",
+                    charInfo.guid, admittedAt, admittedAt + add_time, nextLoginAt);
+                ++admittedThisReconciliation;
+            }
 
             SetEventValue(charInfo.guid, "add", 1, add_time);
             SetEventValue(charInfo.guid, "logout", 0, 0);
@@ -770,6 +1657,95 @@ uint32 RandomPlayerbotMgr::AddRandomBots()
 
             return true;
         };
+
+        if (progressionEnabled)
+        {
+            // Soft region targets take precedence over faction balance. Count a
+            // zone once even if several real players are standing together.
+            std::unordered_set<uint32> playerZones;
+            for (OccupiedZone const& occupied : occupiedZones)
+                playerZones.insert(occupied.zone);
+
+            uint32 desiredTotal = currentBots.size() + maxAllowedBotCount;
+            uint32 sameTarget = (desiredTotal * (playerZones.size() > 1 ? 5 : 10) + 15) / 16;
+            uint32 adjacentTarget = (desiredTotal * 4 + 15) / 16;
+            uint32 elsewhereTarget = (desiredTotal * 2 + 15) / 16;
+            std::unordered_map<uint32, uint32> sameCounts;
+            uint32 adjacentCount = 0;
+            uint32 elsewhereCount = 0;
+            uint32 allianceCount = 0;
+            for (uint32 guid : currentBots)
+            {
+                Player* bot = GetPlayerBot(ObjectGuid::Create<HighGuid::Player>(guid));
+                if (!bot)
+                    continue;
+                if (bot->GetTeamId() == TEAM_ALLIANCE)
+                    ++allianceCount;
+                uint32 zone = bot->GetZoneId();
+                if (playerZones.contains(zone))
+                    ++sameCounts[zone];
+                else if (std::any_of(playerZones.begin(), playerZones.end(),
+                             [zone](uint32 playerZone) { return AreAdjacentProgressionZones(zone, playerZone); }))
+                    ++adjacentCount;
+                else
+                    ++elsewhereCount;
+            }
+
+            auto preference = [&](CharacterInfo const& candidate)
+            {
+                auto [regionRank, levelRank, offlineRank] = candidateRank(candidate);
+                uint32 regionNeed = 0;
+                if (!playerZones.empty())
+                {
+                    if (regionRank == 0)
+                        regionNeed = sameCounts[candidate.zone] < sameTarget ? 0 : 3;
+                    else if (regionRank == 1)
+                        regionNeed = adjacentCount < adjacentTarget ? 1 : 4;
+                    else
+                        regionNeed = elsewhereCount < elsewhereTarget ? 2 : 5;
+                }
+                uint32 starterPreference = regionRank >= 2 && !IsProgressionStarterZone(candidate.zone) ? 1 : 0;
+                uint32 desiredAlliance = desiredTotal * sPlayerbotAIConfig.randomBotAllianceRatio /
+                    std::max<uint32>(1, totalRatio);
+                uint32 factionPreference = (allianceCount < desiredAlliance) == IsAlliance(candidate.rRace) ? 0 : 1;
+                return std::tuple(regionNeed, starterPreference, levelRank, factionPreference, offlineRank);
+            };
+
+            while (maxAllowedBotCount)
+            {
+                std::stable_sort(allCharacters.begin(), allCharacters.end(),
+                                 [&](CharacterInfo const& lhs, CharacterInfo const& rhs)
+                                 { return preference(lhs) < preference(rhs); });
+                bool admitted = false;
+                for (auto const& candidate : allCharacters)
+                {
+                    if (!tryLoginBot(candidate))
+                        continue;
+                    if (IsAlliance(candidate.rRace))
+                        ++allianceCount;
+                    if (playerZones.contains(candidate.zone))
+                        ++sameCounts[candidate.zone];
+                    else if (std::any_of(playerZones.begin(), playerZones.end(),
+                                 [&candidate](uint32 zone)
+                                 { return AreAdjacentProgressionZones(candidate.zone, zone); }))
+                        ++adjacentCount;
+                    else
+                        ++elsewhereCount;
+                    --maxAllowedBotCount;
+                    admitted = true;
+                    break;
+                }
+                if (!admitted)
+                    break;
+            }
+
+            if (maxAllowedBotCount || (!playerZones.empty() &&
+                std::any_of(playerZones.begin(), playerZones.end(),
+                    [&](uint32 zone) { return sameCounts[zone] < sameTarget; })))
+                LOG_INFO("playerbots", "Progression local admission shortfall: {} slots unfilled; {} adjacent and {} elsewhere active.",
+                         maxAllowedBotCount, adjacentCount, elsewhereCount);
+            return currentBots.size();
+        }
 
         // PHASE 1: Log-in Alliance bots up to allowedAllianceCount
         for (auto const& charInfo : allianceChars)
@@ -1356,8 +2332,28 @@ bool RandomPlayerbotMgr::ProcessBot(uint32 bot)
     uint32 isValid = GetEventValue(bot, "add");
     if (!isValid)
     {
+        if (progressionEnabled)
+        {
+            auto minimumEnd = progressionMinimumEnd.find(bot);
+            if (minimumEnd != progressionMinimumEnd.end() && time(nullptr) < minimumEnd->second)
+            {
+                SetEventValue(bot, "add", 1, minimumEnd->second - time(nullptr));
+                return false;
+            }
+            progressionMinimumEnd.erase(bot);
+        }
         if (!player || !player->GetGroup())
         {
+            if (player && IsProgressionCohortBot(player) &&
+                (player->IsInCombat() || (botAI && botAI->HasPlayerNearby(sPlayerbotAIConfig.sightDistance))))
+            {
+                // Session expiry is soft: do not retire while fighting or near
+                // real players. Reconsider gradually after one to two minutes.
+                SetEventValue(bot, "add", 1, urand(60, 120));
+                SetEventValue(bot, "logout", 1, urand(60, 120));
+                return false;
+            }
+
             if (player)
                 LOG_DEBUG("playerbots", "Bot #{} {}:{} <{}>: log out", bot, IsAlliance(player->getRace()) ? "A" : "H",
                           player->GetLevel(), player->GetName().c_str());
@@ -1368,7 +2364,15 @@ bool RandomPlayerbotMgr::ProcessBot(uint32 bot)
             currentBots.erase(bot);
 
             if (player)
+            {
+                if (IsProgressionCohortBot(player))
+                {
+                    player->SaveToDB(false, false);
+                    PlayerbotsDatabase.Execute(
+                        "UPDATE playerbot_progression_session SET last_logout = UNIX_TIMESTAMP() WHERE guid = {}", bot);
+                }
                 LogoutPlayerBot(botGUID);
+            }
         }
 
         return false;
@@ -1377,6 +2381,13 @@ bool RandomPlayerbotMgr::ProcessBot(uint32 bot)
     uint32 randomTime;
     if (!player)
     {
+        if (progressionEnabled)
+        {
+            auto scheduled = progressionLoginNotBefore.find(bot);
+            if (scheduled != progressionLoginNotBefore.end() && time(nullptr) < scheduled->second)
+                return false;
+            progressionLoginNotBefore.erase(bot);
+        }
         AddPlayerBot(botGUID, 0);
         randomTime = urand(1, 2);
 
@@ -1386,12 +2397,12 @@ bool RandomPlayerbotMgr::ProcessBot(uint32 bot)
         SetEventValue(bot, "update", 1, randomTime);
 
         // do not randomize or teleport immediately after server start (prevent lagging)
-        if (!GetEventValue(bot, "randomize"))
+        if (!GetEventValue(bot, "randomize") && !progressionCohort.contains(bot))
         {
             randomTime = urand(3, std::max(4, static_cast<int>(randomBotUpdateInterval * 0.4)));
             ScheduleRandomize(bot, randomTime);
         }
-        if (!GetEventValue(bot, "teleport"))
+        if (!GetEventValue(bot, "teleport") && !progressionCohort.contains(bot))
         {
             randomTime = urand(std::max(7, static_cast<int>(randomBotUpdateInterval * 0.7)),
                                std::max(14, static_cast<int>(randomBotUpdateInterval * 1.4)));
@@ -1493,6 +2504,9 @@ bool RandomPlayerbotMgr::ProcessBot(Player* bot)
         return false;
     }
 
+    if (IsProgressionCohortBot(bot))
+        return false;
+
     // leave group if leader is rndbot
     Group* group = bot->GetGroup();
     if (group && !group->isLFGGroup() && IsRandomBot(group->GetLeader()))
@@ -1589,6 +2603,9 @@ void RandomPlayerbotMgr::Revive(Player* player)
 
 void RandomPlayerbotMgr::RandomTeleport(Player* bot, std::vector<WorldLocation>& locs, bool hearth)
 {
+    if (!bot || IsProgressionCohortBot(bot))
+        return;
+
     // ignore when alrdy teleported or not in the world yet.
     if (bot->IsBeingTeleported() || !bot->IsInWorld())
         return;
@@ -1797,6 +2814,9 @@ void RandomPlayerbotMgr::InitArenaTeams()
 
 void RandomPlayerbotMgr::RandomTeleportForLevel(Player* bot)
 {
+    if (!bot || IsProgressionCohortBot(bot))
+        return;
+
     if (bot->InBattleground())
         return;
 
@@ -1893,7 +2913,7 @@ std::vector<WorldLocation> RandomPlayerbotMgr::GetPlayerZoneTeleportLocations(st
 
 void RandomPlayerbotMgr::RandomTeleportGrindForLevel(Player* bot)
 {
-    if (bot->InBattleground())
+    if (bot->InBattleground() || IsProgressionCohortBot(bot))
         return;
 
     std::vector<WorldLocation> locs = sTravelMgr.GetTeleportLocations(bot);
@@ -1905,7 +2925,7 @@ void RandomPlayerbotMgr::RandomTeleportGrindForLevel(Player* bot)
 
 void RandomPlayerbotMgr::RandomTeleport(Player* bot)
 {
-    if (bot->InBattleground())
+    if (bot->InBattleground() || IsProgressionCohortBot(bot))
         return;
 
     PerfMonitorOperation* pmo = sPerfMonitor.start(PERF_MON_RNDBOT, "RandomTeleport");
@@ -1944,7 +2964,7 @@ void RandomPlayerbotMgr::RandomTeleport(Player* bot)
 
 void RandomPlayerbotMgr::Randomize(Player* bot)
 {
-    if (bot->InBattleground())
+    if (bot->InBattleground() || IsProgressionCohortBot(bot))
         return;
 
     if (bot->GetLevel() < 3 || (bot->GetLevel() < 56 && bot->getClass() == CLASS_DEATH_KNIGHT))
@@ -1966,6 +2986,8 @@ void RandomPlayerbotMgr::Randomize(Player* bot)
 
 void RandomPlayerbotMgr::IncreaseLevel(Player* bot)
 {
+    if (IsProgressionCohortBot(bot))
+        return;
     uint32 maxLevel = sPlayerbotAIConfig.randomBotMaxLevel;
     if (maxLevel > sWorld->getIntConfig(CONFIG_MAX_PLAYER_LEVEL))
         maxLevel = sWorld->getIntConfig(CONFIG_MAX_PLAYER_LEVEL);
@@ -1989,6 +3011,8 @@ void RandomPlayerbotMgr::IncreaseLevel(Player* bot)
 
 void RandomPlayerbotMgr::RandomizeFirst(Player* bot)
 {
+    if (IsProgressionCohortBot(bot))
+        return;
     PlayerbotAI* botAI = GET_PLAYERBOT_AI(bot);
     if (!botAI)
         return;
@@ -2084,6 +3108,8 @@ void RandomPlayerbotMgr::RandomizeFirst(Player* bot)
 
 void RandomPlayerbotMgr::RandomizeMin(Player* bot)
 {
+    if (IsProgressionCohortBot(bot))
+        return;
     PlayerbotAI* botAI = GET_PLAYERBOT_AI(bot);
     if (!botAI)
         return;

@@ -5,6 +5,10 @@
  */
 
 #include "QuestAction.h"
+
+#include <algorithm>
+#include <sstream>
+
 #include "BroadcastHelper.h"
 #include "Chat.h"
 #include "ChatHelper.h"
@@ -13,10 +17,9 @@
 #include "ObjectGuid.h"
 #include "ObjectMgr.h"
 #include "Playerbots.h"
+#include "RandomPlayerbotMgr.h"
 #include "ReputationMgr.h"
 #include "ServerFacade.h"
-#include <algorithm>
-#include <sstream>
 
 bool QuestAction::Execute(Event event)
 {
@@ -25,6 +28,9 @@ bool QuestAction::Execute(Event event)
 
     // Checks if the bot and botAI are valid
     if (!bot || !botAI)
+        return false;
+
+    if (sRandomPlayerbotMgr.IsProgressionPausedBot(bot))
         return false;
 
     // Sets guid based on bot or master target
@@ -74,6 +80,9 @@ bool QuestAction::Execute(Event event)
 
 bool QuestAction::CompleteQuest(Player* player, uint32 entry)
 {
+    if (player && sRandomPlayerbotMgr.IsProgressionCohortBot(player))
+        return false;
+
     Quest const* pQuest = sObjectMgr->GetQuestTemplate(entry);
 
     // If player doesn't have the quest

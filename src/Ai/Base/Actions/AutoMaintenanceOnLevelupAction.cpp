@@ -71,7 +71,8 @@ void AutoMaintenanceOnLevelupAction::LearnSpells(std::ostringstream* out)
     if (sPlayerbotAIConfig.autoLearnTrainerSpells && sRandomPlayerbotMgr.IsRandomBot(bot))
         LearnTrainerSpells(out);
 
-    if (sPlayerbotAIConfig.autoLearnQuestSpells && sRandomPlayerbotMgr.IsRandomBot(bot))
+    if (sPlayerbotAIConfig.autoLearnQuestSpells && sRandomPlayerbotMgr.IsRandomBot(bot) &&
+        !sRandomPlayerbotMgr.IsProgressionCohortBot(bot))
         LearnQuestSpells(out);
 }
 
@@ -161,6 +162,9 @@ std::string const AutoMaintenanceOnLevelupAction::FormatSpell(SpellInfo const* s
 void AutoMaintenanceOnLevelupAction::AutoUpgradeEquip()
 {
     if (!sRandomPlayerbotMgr.IsRandomBot(bot))
+        return;
+
+    if (sRandomPlayerbotMgr.IsProgressionCohortBot(bot))
         return;
 
     PlayerbotFactory factory(bot, bot->GetLevel());

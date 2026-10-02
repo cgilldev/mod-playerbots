@@ -5,11 +5,13 @@
  */
 
 #include "XpGainAction.h"
+
 #include "BroadcastHelper.h"
 #include "Event.h"
 #include "GuildMgr.h"
 #include "PlayerbotAIConfig.h"
 #include "Playerbots.h"
+#include "RandomPlayerbotMgr.h"
 
 bool XpGainAction::Execute(Event event)
 {
@@ -65,6 +67,9 @@ void XpGainAction::GiveXP(uint32 xp, Unit* victim)
         return;
     }
 
+    if (sRandomPlayerbotMgr.IsProgressionPausedBot(bot))
+        return;
+
     uint32 level = bot->GetLevel();
 
     // XP to money conversion processed in Player::RewardQuest
@@ -88,7 +93,13 @@ void XpGainAction::GiveXP(uint32 xp, Unit* victim)
 
         if (level < sWorld->getIntConfig(CONFIG_MAX_PLAYER_LEVEL))
         {
+            uint8 previousLevel = bot->GetLevel();
             bot->GiveLevel(level + 1);
+            if (bot->GetLevel() == previousLevel)
+            {
+                newXP = 0;
+                break;
+            }
         }
 
         level = bot->GetLevel();

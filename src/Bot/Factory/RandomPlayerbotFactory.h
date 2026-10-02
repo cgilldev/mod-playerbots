@@ -51,7 +51,9 @@ public:
     RandomPlayerbotFactory() {};
     virtual ~RandomPlayerbotFactory() {}
 
-    Player* CreateRandomBot(WorldSession* session, uint8 cls, std::unordered_map<NameRaceAndGender, std::vector<std::string>>& names);
+    Player* CreateRandomBot(WorldSession* session, uint8 cls,
+                            std::unordered_map<NameRaceAndGender, std::vector<std::string>>& names,
+                            std::unordered_map<uint8, uint32>& raceCounts, bool progressionPoolEnabled);
     static void CreateRandomBots();
     static std::string const CreateRandomGuildName();
     static uint32 CalculateTotalAccountCount();

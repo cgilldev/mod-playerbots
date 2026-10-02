@@ -5,16 +5,17 @@
  */
 
 #include "Playerbots.h"
+
+#include <mysqld_error.h>
+
 #include "BattleGroundTactics.h"
 #include "BattlefieldScript.h"
+#include "BuiltInConfig.h"
 #include "Channel.h"
 #include "CheckMountStateAction.h"
 #include "Config.h"
-#include "BuiltInConfig.h"
 #include "DBUpdater.h"
 #include "DatabaseEnv.h"
-#include "PlayerbotsDatabase.h"
-#include <mysqld_error.h>
 #include "GuildTaskMgr.h"
 #include "PlayerScript.h"
 #include "PlayerbotAIConfig.h"
@@ -22,8 +23,10 @@
 #include "PlayerbotGuildMgr.h"
 #include "PlayerbotSpellRepository.h"
 #include "PlayerbotWorldThreadProcessor.h"
+#include "PlayerbotsDatabase.h"
 #include "RandomPlayerbotMgr.h"
 #include "ScriptMgr.h"
+#include "SharedDefines.h"
 #include "cmath"
 
 class PlayerbotsDatabaseScript : public DatabaseScript
@@ -209,6 +212,12 @@ public:
 
     void OnPlayerAfterUpdate(Player* player, uint32 diff) override
     {
+        if (player && !player->GetSession()->IsBot())
+        {
+            // The world-thread progression service persists anchor levels; this
+            // hook intentionally performs no database work on a map thread.
+            sRandomPlayerbotMgr.ObserveProgressionAnchor(player);
+        }
         PlayerbotAI* const botAI = PlayerbotsMgr::instance().GetPlayerbotAI(player);
 
         if (botAI != nullptr)
@@ -320,13 +329,18 @@ public:
 
     void OnPlayerGiveXP(Player* player, uint32& amount, Unit* /*victim*/, uint8 /*xpSource*/) override
     {
-        // early return
-        if (sPlayerbotAIConfig.randomBotXPRate == 1.0 || !player)
+        if (!player)
             return;
 
         // no XP multiplier, when player is no bot.
         if (!player->GetSession()->IsBot() || !sRandomPlayerbotMgr.IsRandomBot(player))
             return;
+
+        if (sRandomPlayerbotMgr.IsProgressionCohortBot(player) && sRandomPlayerbotMgr.IsProgressionPausedBot(player))
+        {
+            amount = 0;
+            return;
+        }
 
         // no XP multiplier, when bot is in a group with a real player.
         if (Group* group = player->GetGroup())
@@ -343,7 +357,13 @@ public:
         }
 
         // otherwise apply bot XP multiplier.
-        amount = static_cast<uint32>(std::round(static_cast<float>(amount) * sPlayerbotAIConfig.randomBotXPRate));
+        if (sPlayerbotAIConfig.randomBotXPRate != 1.0)
+            amount = static_cast<uint32>(std::round(static_cast<float>(amount) * sPlayerbotAIConfig.randomBotXPRate));
+    }
+
+    bool OnPlayerCanGiveLevel(Player* player, uint8 newLevel) override
+    {
+        return sRandomPlayerbotMgr.CanProgressCohortLevel(player, newLevel);
     }
 };
 
@@ -410,6 +430,7 @@ public:
         LOG_INFO("server.loading", "Load Playerbots Config...");
 
         sPlayerbotAIConfig.Initialize();
+        sRandomPlayerbotMgr.InitializeProgression();
 
         LOG_INFO("server.loading", ">> Loaded playerbots config in {} ms", GetMSTimeDiffToNow(oldMSTime));
         LOG_INFO("server.loading", " ");
@@ -422,6 +443,7 @@ public:
 
     void OnUpdate(uint32 diff) override
     {
+        sRandomPlayerbotMgr.ObserveWorldUpdate();
         PlayerbotWorldThreadProcessor::instance().Update(diff);
         sRandomPlayerbotMgr.UpdateAI(diff);  // World thread only
     }

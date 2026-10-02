@@ -37,6 +37,7 @@ public:
             {"gtask", HandleGuildTaskCommand, SEC_GAMEMASTER, Console::Yes},
             {"pmon", HandlePerfMonCommand, SEC_GAMEMASTER, Console::Yes},
             {"rndbot", HandleRandomPlayerbotCommand, SEC_GAMEMASTER, Console::Yes},
+            {"progress", HandleProgressionCommand, SEC_GAMEMASTER, Console::Yes},
             {"debug", playerbotsDebugCommandTable},
             {"account", playerbotsAccountCommandTable},
         };
@@ -56,6 +57,11 @@ public:
     static bool HandleRandomPlayerbotCommand(ChatHandler* handler, char const* args)
     {
         return RandomPlayerbotMgr::HandlePlayerbotConsoleCommand(handler, args);
+    }
+
+    static bool HandleProgressionCommand(ChatHandler* handler, char const* args)
+    {
+        return sRandomPlayerbotMgr.HandleProgressionCommand(handler, args);
     }
 
     static bool HandleGuildTaskCommand(ChatHandler* handler, char const* args)

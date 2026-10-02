@@ -7,12 +7,14 @@
 #ifndef PLAYERBOTS_RANDOMPLAYERBOTMGR_H
 #define PLAYERBOTS_RANDOMPLAYERBOTMGR_H
 
+#include <atomic>
+#include <unordered_set>
+
 #include "GameTime.h"
 #include "NewRpgInfo.h"
 #include "ObjectGuid.h"
 #include "PlayerbotCommandServer.h"
 #include "PlayerbotMgr.h"
-#include <unordered_set>
 
 struct BattlegroundInfo
 {
@@ -100,11 +102,16 @@ public:
 
     void LogPlayerLocation();
     void UpdateAIInternal(uint32 elapsed, bool minimal = false) override;
+    void ObserveWorldUpdate();
 
     uint32 activeBots = 0;
     static bool HandlePlayerbotConsoleCommand(ChatHandler* handler, char const* args);
     bool IsRandomBot(Player* bot);
     bool IsRandomBot(ObjectGuid::LowType bot);
+    bool IsProgressionManagedBot(Player* bot);
+    bool IsProgressionCohortBot(Player* bot);
+    bool IsProgressionPausedBot(Player* bot);
+    bool CanProgressCohortLevel(Player* bot, uint8 newLevel);
     bool IsAddclassBot(Player* bot);
     bool IsAddclassBot(ObjectGuid::LowType bot);
     void Randomize(Player* bot);
@@ -134,6 +141,15 @@ public:
     void RandomTeleportGrindForLevel(Player* bot);
     void RandomTeleportForRpg(Player* bot);
     uint32 GetMaxAllowedBotCount();
+    uint8 GetProgressionLevelCeiling() const { return progressionLevelCeiling.load(); }
+    bool IsProgressionReady() const { return progressionReady.load(); }
+    bool IsProgressionEnabled() const { return progressionEnabled; }
+    bool HandleProgressionCommand(ChatHandler* handler, char const* args);
+    void InitializeProgression();
+    void UpdateProgression();
+    void ObserveProgressionAnchor(Player* player);
+    void ArmOfflineProgression();
+    void CancelOfflineProgression();
     bool ProcessBot(Player* player);
     void Revive(Player* player);
     void ChangeStrategy(Player* player);
@@ -179,6 +195,23 @@ protected:
     void OnBotLoginInternal(Player* const bot) override;
 
 private:
+    static constexpr uint32 PROGRESSION_DISARMED = 0;
+    static constexpr uint32 PROGRESSION_ARMED = 1;
+    static constexpr uint32 PROGRESSION_RUNNING = 2;
+    static constexpr uint32 PROGRESSION_COMPLETED = 3;
+    static constexpr uint32 PROGRESSION_CANCELLED = 4;
+    static constexpr uint32 PROGRESSION_SAFETY_STOPPED = 5;
+
+    struct PlayerZoneState
+    {
+        uint32 zone = 0;
+        uint32 map = 0;
+        uint32 pendingZone = 0;
+        time_t pendingSince = 0;
+        uint8 level = 1;
+        TeamId team = TEAM_NEUTRAL;
+    };
+
     RandomPlayerbotMgr() : PlayerbotHolder()
     {
         this->playersLevel = sPlayerbotAIConfig.randombotStartingLevel;
@@ -236,6 +269,11 @@ private:
     time_t DelayLoginBotsTimer;
     time_t printStatsTimer;
     uint32 AddRandomBots();
+    bool HasRealPlayerOnline() const;
+    uint32 CountCappedCohortBots();
+    void PersistProgressionSession();
+    void StopOfflineProgression(uint32 state, char const* reason);
+    bool RetireOneSafeBot(char const* reason);
     bool ProcessBot(uint32 bot);
     void ScheduleRandomize(uint32 bot, uint32 time);
     void RandomTeleport(Player* bot);
@@ -250,6 +288,41 @@ private:
     std::map<TeamId, std::map<BattlegroundTypeId, std::vector<uint32>>> BattleMastersCache;
     std::unordered_map<uint32, BotEventCache> eventCache;
     std::unordered_set<uint32> currentBots;
+    std::unordered_set<uint32> progressionCohort;
+    std::unordered_map<uint32, time_t> progressionLoginNotBefore;
+    std::unordered_map<uint32, time_t> progressionMinimumEnd;
+    std::unordered_map<uint32, PlayerZoneState> playerZoneStates;
+    std::atomic<uint8> progressionLevelCeiling{0};
+    std::atomic<bool> progressionReady{false};
+    std::atomic<bool> progressionCeilingDirty{false};
+    uint32 progressionCheckTime = 0;
+    time_t progressionRoutineCheckTime = 0;
+    time_t offlineProgressionLastPersist = 0;
+    uint32 nextProgressionAdmission = 0;
+    uint32 progressionAnchor1 = 5;
+    uint32 progressionAnchor2 = 6;
+    uint32 progressionAnchor1Zone = 0;
+    uint32 progressionAnchor1Map = 0;
+    uint32 progressionAnchor2Zone = 0;
+    uint32 progressionAnchor2Map = 0;
+    bool progressionEnabled = false;
+    bool offlineActivityOverride = false;
+    uint64 worldUpdateDiffSum = 0;
+    uint32 worldUpdateDiffSamples = 0;
+    uint32 worldUpdateAverage = 0;
+    time_t worldUpdateWindowStart = 0;
+    time_t updatePressureSince = 0;
+    time_t guestMemoryPressureSince = 0;
+    time_t hostMemoryPressureSince = 0;
+    time_t lastPopulationScale = 0;
+    time_t lastProgressionSummary = 0;
+    time_t lowUpdateSince = 0;
+    bool performanceAdmissionPaused = false;
+    std::atomic<uint32> offlineProgressionState{0};
+    std::atomic<uint32> offlineProgressionSeconds{0};
+    time_t offlineProgressionLastUpdate = 0;
+    uint32 noRealPlayerMemoryPressureSince = 0;
+    uint32 normalBotActiveAlone = 0;
     uint32 playersLevel;
 
     // Account lists

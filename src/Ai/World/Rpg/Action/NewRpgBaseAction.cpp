@@ -484,6 +484,9 @@ bool NewRpgBaseAction::AcceptQuest(Quest const* quest, ObjectGuid guid)
 
 bool NewRpgBaseAction::TurnInQuest(Quest const* quest, ObjectGuid guid)
 {
+    if (sRandomPlayerbotMgr.IsProgressionPausedBot(bot))
+        return false;
+
     uint32 questID = quest->GetQuestId();
 
     if (bot->GetQuestRewardStatus(questID))
@@ -692,6 +695,9 @@ bool NewRpgBaseAction::OrganizeQuestLog()
 
 bool NewRpgBaseAction::SearchQuestGiverAndAcceptOrReward()
 {
+    if (sRandomPlayerbotMgr.IsProgressionPausedBot(bot))
+        return false;
+
     OrganizeQuestLog();
     if (ObjectGuid npcOrGo = ChooseNpcOrGameObjectToInteract(true, 80.0f))
     {

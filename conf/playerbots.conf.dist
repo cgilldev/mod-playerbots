@@ -96,6 +96,30 @@ AiPlayerbot.MaxRandomBots = 500
 # Default: 0 (automatic)
 AiPlayerbot.RandomBotAccountCount = 0
 
+# Persistent progression is opt-in; when enabled, anchors are character GUIDs and
+# the level ceiling persists at its highest observed value.
+AiPlayerbot.ProgressionEnabled = 0
+AiPlayerbot.ProgressionAnchor1 = 5
+AiPlayerbot.ProgressionAnchor2 = 6
+# Number of eligible random bot characters to maintain, including the current pool.
+AiPlayerbot.ProgressionPoolSize = 80
+# Maximum autonomous population during ordinary player sessions; capped at 16.
+AiPlayerbot.ProgressionActiveTarget = 16
+AiPlayerbot.ProgressionActiveFloor = 12
+# Additional adjacent zone pairs in zoneId-zoneId form, comma separated.
+# Required starter routes are built in; these values add progression routes.
+AiPlayerbot.ProgressionAdjacentZones =
+# Minimum and maximum cohort session lengths, in minutes.
+AiPlayerbot.ProgressionSessionMinMinutes = 30
+AiPlayerbot.ProgressionSessionMaxMinutes = 90
+# Maximum offline progression runtime in hours; valid values are 1 through 12.
+AiPlayerbot.OfflineProgressionMaxHours = 12
+# Minimum available guest memory in MiB before unattended progression pauses.
+AiPlayerbot.OfflineProgressionMinAvailableMemory = 512
+# Updated by the Proxmox host monitor. Missing or stale data safety-stops the offline run.
+AiPlayerbot.OfflineProgressionHostMemoryFile = "/run/playerbots/host-memavailable-kib"
+AiPlayerbot.OfflineProgressionHostMinAvailableMemory = 1024
+
 # Addclass accounts
 # Number of accounts created for bots reserved for the addclass command. As with randombots, each account has
 # 10 bots (or 9 if WotLK is disabled), one bot for each class.
