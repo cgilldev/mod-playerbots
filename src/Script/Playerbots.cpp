@@ -8,6 +8,7 @@
 
 #include <mysqld_error.h>
 
+#include "AuctionSellingObserver.h"
 #include "BattleGroundTactics.h"
 #include "BattlefieldScript.h"
 #include "BuiltInConfig.h"
@@ -123,18 +124,16 @@ public:
 class PlayerbotsPlayerScript : public PlayerScript
 {
 public:
-    PlayerbotsPlayerScript() : PlayerScript("PlayerbotsPlayerScript", {
-        PLAYERHOOK_ON_LOGIN,
-        PLAYERHOOK_ON_AFTER_UPDATE,
-        PLAYERHOOK_ON_BEFORE_CRITERIA_PROGRESS,
-        PLAYERHOOK_ON_BEFORE_ACHI_COMPLETE,
-        PLAYERHOOK_CAN_PLAYER_USE_PRIVATE_CHAT,
-        PLAYERHOOK_CAN_PLAYER_USE_GROUP_CHAT,
-        PLAYERHOOK_CAN_PLAYER_USE_GUILD_CHAT,
-        PLAYERHOOK_CAN_PLAYER_USE_CHANNEL_CHAT,
-        PLAYERHOOK_ON_GIVE_EXP,
-        PLAYERHOOK_ON_BEFORE_TELEPORT
-    }) {}
+    PlayerbotsPlayerScript()
+        : PlayerScript("PlayerbotsPlayerScript",
+                       {PLAYERHOOK_ON_LOGIN, PLAYERHOOK_ON_AFTER_UPDATE, PLAYERHOOK_ON_BEFORE_CRITERIA_PROGRESS,
+                        PLAYERHOOK_ON_BEFORE_ACHI_COMPLETE, PLAYERHOOK_CAN_PLAYER_USE_PRIVATE_CHAT,
+                        PLAYERHOOK_CAN_PLAYER_USE_GROUP_CHAT, PLAYERHOOK_CAN_PLAYER_USE_GUILD_CHAT,
+                        PLAYERHOOK_CAN_PLAYER_USE_CHANNEL_CHAT, PLAYERHOOK_ON_GIVE_EXP, PLAYERHOOK_ON_STORE_NEW_ITEM,
+                        PLAYERHOOK_ON_LOOT_ITEM, PLAYERHOOK_ON_AFTER_MOVE_ITEM_FROM_INVENTORY,
+                        PLAYERHOOK_ON_AFTER_MOVE_ITEM_TO_INVENTORY, PLAYERHOOK_ON_BEFORE_TELEPORT})
+    {
+    }
 
     void OnPlayerLogin(Player* player) override
     {
@@ -222,6 +221,7 @@ public:
 
         if (botAI != nullptr)
         {
+            botAI->UpdateAuctionSelling(diff);
             botAI->UpdateAI(diff);
         }
 
@@ -229,6 +229,39 @@ public:
         {
             playerbotMgr->UpdateAI(diff);
         }
+    }
+
+    void OnPlayerStoreNewItem(Player* player, Item* item, uint32 count) override
+    {
+        if (!sPlayerbotAIConfig.auctionSellingDryRun || !player)
+            return;
+
+        if (PlayerbotAI* botAI = GET_PLAYERBOT_AI(player))
+            if (AuctionSellingObserver* observer = botAI->GetAuctionSellingObserver(true))
+                observer->RecordStored(item, count);
+    }
+
+    void OnPlayerLootItem(Player* player, Item* item, uint32 count, ObjectGuid lootGuid) override
+    {
+        if (!sPlayerbotAIConfig.auctionSellingDryRun || !player || (!lootGuid.IsCreature() && !lootGuid.IsGameObject()))
+            return;
+
+        if (PlayerbotAI* botAI = GET_PLAYERBOT_AI(player))
+            if (AuctionSellingObserver* observer = botAI->GetAuctionSellingObserver())
+                observer->RecordLoot(item, count);
+    }
+
+    void OnPlayerAfterMoveItemFromInventory(Player* player, Item* item, uint8 /*bag*/, uint8 /*slot*/,
+                                            bool /*update*/) override
+    {
+        ForgetAuctionInventory(player, item);
+    }
+
+    void OnPlayerAfterMoveItemToInventory(Player* player, Item* item, bool /*update*/) override
+    {
+        // Incoming mail/trades and stack transfers are unproven. Until durable
+        // allocation tracking exists, discard affected provenance conservatively.
+        ForgetAuctionInventory(player, item);
     }
 
     using PlayerScript::OnPlayerCanUseChat;  // keep the base overloads visible
@@ -364,6 +397,17 @@ public:
     bool OnPlayerCanGiveLevel(Player* player, uint8 newLevel) override
     {
         return sRandomPlayerbotMgr.CanProgressCohortLevel(player, newLevel);
+    }
+
+private:
+    static void ForgetAuctionInventory(Player* player, Item* item)
+    {
+        if (!sPlayerbotAIConfig.auctionSellingDryRun || !player)
+            return;
+
+        if (PlayerbotAI* botAI = GET_PLAYERBOT_AI(player))
+            if (AuctionSellingObserver* observer = botAI->GetAuctionSellingObserver())
+                observer->Forget(item);
     }
 };
 

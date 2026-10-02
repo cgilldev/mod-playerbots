@@ -7,6 +7,9 @@
 #ifndef PLAYERBOTS_PLAYERBOTAI_H
 #define PLAYERBOTS_PLAYERBOTAI_H
 
+#include <memory>
+#include <stack>
+
 #include "Chat.h"
 #include "ChatFilter.h"
 #include "ChatHelper.h"
@@ -23,9 +26,9 @@
 #include "SpellAuras.h"
 #include "Util.h"
 #include "WorldPacket.h"
-#include <stack>
 
 class AiObjectContext;
+class AuctionSellingObserver;
 class Creature;
 class Engine;
 class ExternalEventHelper;
@@ -537,6 +540,8 @@ public:
     float GetRange(std::string const type);
 
     Player* GetBot() { return bot; }
+    AuctionSellingObserver* GetAuctionSellingObserver(bool create = false);
+    void UpdateAuctionSelling(uint32 elapsed);
     Player* GetMaster() { return master; }
     Player* FindNewMaster();
 
@@ -618,6 +623,7 @@ private:
     void UpdateAIGroupMaster();
     Item* FindItemInInventory(std::function<bool(ItemTemplate const*)> checkItem) const;
     void HandleCommands();
+    std::unique_ptr<AuctionSellingObserver> _auctionSellingObserver;
     void HandleCommand(uint32 type, std::string const& text, Player& fromPlayer, const uint32 lang = LANG_UNIVERSAL);
     inline bool IsValidUnit(Unit const* unit) const
     {

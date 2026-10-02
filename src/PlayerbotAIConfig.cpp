@@ -81,6 +81,12 @@ bool PlayerbotAIConfig::Initialize()
     LOG_INFO("server.loading", "Initializing mod-playerbots, based on AI Playerbots by ike3 and the original Playerbots by blueboy");
 
     enabled = sConfigMgr->GetOption<bool>("AiPlayerbot.Enabled", true);
+    auctionSellingDryRun = sConfigMgr->GetOption<bool>("AiPlayerbot.AuctionSelling.DryRun", false);
+    auctionSellingDryRunBotGuids.clear();
+    std::string const auctionObserverGuids =
+        sConfigMgr->GetOption<std::string>("AiPlayerbot.AuctionSelling.DryRunBotGuids", "");
+    if (!auctionObserverGuids.empty())
+        LoadSet<std::set<uint32>>(auctionObserverGuids, auctionSellingDryRunBotGuids);
     if (!enabled)
     {
         LOG_INFO("server.loading", "Playerbots Module is disabled in playerbots.conf");

@@ -5,7 +5,14 @@
  */
 
 #include "PlayerbotAI.h"
+
+#include <cmath>
+#include <mutex>
+#include <sstream>
+#include <string>
+
 #include "AiFactory.h"
+#include "AuctionSellingObserver.h"
 #include "BudgetValues.h"
 #include "ChannelMgr.h"
 #include "CharacterPackets.h"
@@ -53,10 +60,6 @@
 #include "Unit.h"
 #include "UpdateTime.h"
 #include "Vehicle.h"
-#include <cmath>
-#include <mutex>
-#include <sstream>
-#include <string>
 
 namespace
 {
@@ -241,6 +244,39 @@ PlayerbotAI::~PlayerbotAI()
 
     if (bot)
         PlayerbotsMgr::instance().RemovePlayerBotData(bot->GetGUID(), true);
+}
+
+AuctionSellingObserver* PlayerbotAI::GetAuctionSellingObserver(bool create)
+{
+    if (!sPlayerbotAIConfig.auctionSellingDryRun || !bot || !sRandomPlayerbotMgr.IsProgressionCohortBot(bot))
+    {
+        _auctionSellingObserver.reset();
+        return nullptr;
+    }
+
+    auto const& selectedGuids = sPlayerbotAIConfig.auctionSellingDryRunBotGuids;
+    if (!selectedGuids.empty() && !selectedGuids.contains(static_cast<uint32>(bot->GetGUID().GetRawValue())))
+    {
+        _auctionSellingObserver.reset();
+        return nullptr;
+    }
+
+    if (create && !_auctionSellingObserver)
+        _auctionSellingObserver = std::make_unique<AuctionSellingObserver>(urand(1, 60000));
+
+    return _auctionSellingObserver.get();
+}
+
+void PlayerbotAI::UpdateAuctionSelling(uint32 elapsed)
+{
+    if (!sPlayerbotAIConfig.auctionSellingDryRun)
+    {
+        _auctionSellingObserver.reset();
+        return;
+    }
+
+    if (AuctionSellingObserver* observer = GetAuctionSellingObserver(true))
+        observer->Update(this, elapsed);
 }
 
 void PlayerbotAI::UpdateAI(uint32 elapsed, bool minimal)

@@ -103,6 +103,8 @@ public:
     bool IsInPvpProhibitedArea(uint32 id);
 
     bool enabled;
+    bool auctionSellingDryRun = false;
+    std::set<uint32> auctionSellingDryRunBotGuids;
     bool disabledWithoutRealPlayer;
     bool EnableICCBuffs;
     bool allowAccountBots, allowGuildBots, allowTrustedAccountBots;

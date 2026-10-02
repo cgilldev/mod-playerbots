@@ -1,6 +1,13 @@
 # Playerbot auction selling implementation plan
 
-Date: 2026-10-02. Status: proposed; no feature code implemented or enabled.
+Date: 2026-10-02. Status: design with an initial disabled inventory-observer slice;
+live auction selling is not implemented or enabled.
+
+Initial implementation: session-local matching store/loot observations, whole-stack
+eligibility, staggered dry-run snapshots and focused quantity/preservation tests.
+See `docs/auction-selling.md` for actual configuration, validation and limitations.
+Persistent provenance, pricing, companion economy safeguards, native mutations,
+mail settlement and town behavior remain to be implemented.
 
 Read with the adjacent REQUIREMENTS and ANALYSIS documents. Existing inspected
 branches are `persistent-bots-ah-20261002` in the three source repositories.

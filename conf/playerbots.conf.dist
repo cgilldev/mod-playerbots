@@ -120,6 +120,17 @@ AiPlayerbot.OfflineProgressionMinAvailableMemory = 512
 AiPlayerbot.OfflineProgressionHostMemoryFile = "/run/playerbots/host-memavailable-kib"
 AiPlayerbot.OfflineProgressionHostMinAvailableMemory = 1024
 
+# Auction-selling inventory observation only. Disabled by default; does not reserve
+# items, change vendor behavior, travel, list auctions or collect mail.
+# Tracks ordinary creature/gameobject loot acquired during the current login;
+# pre-existing, crafted, factory/reset, trade and mail stock is not proven earned.
+# Summarizes inventory eligibility in playerbots logs at most once per minute per
+# selected bot, only when results change. Market/profit evaluation is not implemented.
+AiPlayerbot.AuctionSelling.DryRun = 0
+# Optional comma-separated character GUIDs within the progression cohort.
+# Empty observes the cohort; use a small explicit set for an initial pilot.
+AiPlayerbot.AuctionSelling.DryRunBotGuids =
+
 # Addclass accounts
 # Number of accounts created for bots reserved for the addclass command. As with randombots, each account has
 # 10 bots (or 9 if WotLK is disabled), one bot for each class.
